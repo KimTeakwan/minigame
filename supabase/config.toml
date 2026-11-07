@@ -1,0 +1,2 @@
+# Supabase CLI 설정. GitHub Actions가 이 폴더(supabase/)의 migrations 를 Supabase에 적용할 때 써요.
+project_id = "minigame"

@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+/* 시안의 색과 글꼴을 Tailwind 토큰으로 옮긴 것. bg-ink, text-muted, bg-accent 처럼 써요. */
+@theme {
+  --color-ground: #f7f6f2;
+  --color-surface: #ffffff;
+  --color-ink: #17171c;
+  --color-body: #3a3a42;
+  --color-muted: #5b5b66;
+  --color-line: #e3e1da;
+  --color-line-strong: #d4d2ca;
+  --color-chip: #f2f1ec;
+  --color-accent: #c2410c;
+  --color-accent-bright: #ea580c;
+  --color-accent-soft: #fde7d9;
+  --color-accent-ink: #9a3412;
+  --color-danger: #b42318;
+
+  --font-sans: var(--font-noto), system-ui, sans-serif;
+  --font-display: var(--font-black-han), var(--font-noto), sans-serif;
+}
+
+html,
+body {
+  background: var(--color-ground);
+  color: var(--color-ink);
+}
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 3px solid var(--color-accent-bright);
+  outline-offset: 2px;
+}
