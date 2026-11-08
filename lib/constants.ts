@@ -5,7 +5,7 @@ export const MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024;
 
 // published_games 뷰에서 게임 카드에 필요한 컬럼
 export const CARD_COLUMNS =
-  "id,title,thumbnail_url,controls,ai_tool,tags,category_name,uploader_nickname,play_count,like_count,created_at";
+  "id,title,thumbnail_url,controls,ai_tool,tags,category_name,uploader_nickname,uploader_is_official,play_count,like_count,created_at";
 
 export const CONTROL_LABELS: Record<string, string> = {
   keyboard: "키보드",

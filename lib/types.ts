@@ -8,6 +8,7 @@ export type GameCardData = {
   tags: string[];
   category_name: string | null;
   uploader_nickname: string;
+  uploader_is_official: boolean; // 공식 계정(운영팀 AI 제작)이 올린 게임
   play_count: number;
   like_count: number;
   created_at: string;

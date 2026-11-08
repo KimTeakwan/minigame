@@ -10,6 +10,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { unzipSync } from "fflate";
+import { DANGEROUS } from "./lib/game-rules.mjs";
 
 const env = (name) => {
   const v = process.env[name];
@@ -30,15 +31,6 @@ const BUCKET = env("R2_BUCKET");
 
 const MAX_UNZIPPED_BYTES = 150 * 1024 * 1024;
 const MAX_FILES = 1000;
-
-// 게임에서 나오면 안 되는 코드 패턴. 걸리면 검사 실패로 처리하고 사유를 알려줘요.
-const DANGEROUS = [
-  { re: /document\.cookie/i, why: "쿠키에 접근하는 코드가 있어요" },
-  { re: /(top|parent)\.location\s*(=|\.href\s*=|\.replace|\.assign)/i, why: "바깥 페이지를 다른 곳으로 보내는 코드가 있어요" },
-  { re: /<form[^>]+action\s*=\s*["']https?:/i, why: "외부 사이트로 정보를 보내는 입력 양식이 있어요" },
-  { re: /(eval|Function)\s*\(\s*atob\s*\(/i, why: "숨겨진 코드를 실행하는 부분이 있어요" },
-  { re: /coinhive|cryptonight|coin-hive|webminer/i, why: "채굴 코드로 보이는 부분이 있어요" },
-];
 
 const CONTENT_TYPES = {
   html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8", js: "text/javascript", mjs: "text/javascript",

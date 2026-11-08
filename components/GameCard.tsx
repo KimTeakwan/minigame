@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { GameCardData } from "@/lib/types";
 import { CONTROL_LABELS, aiToolLabel } from "@/lib/constants";
+import OfficialBadge from "@/components/OfficialBadge";
 
 const TINTS = [
   ["#FDE7D9", "#9A3412"],
@@ -60,9 +61,10 @@ export default function GameCard({ game, rank, badge }: Props) {
           <span className="self-start rounded-md bg-accent-soft px-2 py-px text-xs font-medium text-accent-ink">{badge}</span>
         )}
         <span className="text-base font-bold">{game.title}</span>
-        <span className="text-[13px] text-muted">
+        <span className="flex flex-wrap items-center gap-1 text-[13px] text-muted">
           {game.uploader_nickname}
-          {game.category_name ? ` · ${game.category_name}` : ""}
+          {game.uploader_is_official && <OfficialBadge />}
+          {game.category_name ? <span>· {game.category_name}</span> : null}
         </span>
         <span className="text-[13px] text-muted">
           좋아요 {game.like_count.toLocaleString()} · {CONTROL_LABELS[game.controls]}

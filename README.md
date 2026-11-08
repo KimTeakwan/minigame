@@ -116,6 +116,40 @@ npm run worker -- --watch # 30초마다 계속 확인
 
 3. 통과하면 홈의 "최신 게임"에 바로 올라와요. 실패하면 알림으로 사유가 가요.
 
+### 9. 공식 게임 (에이전트가 만들어요)
+
+운영팀 에이전트가 매일 게임 1개를 만들어 GitHub PR로 올려요. PR에서 플레이해보고 **Merge**하면 공식 계정으로 사이트에 올라가요.
+자세한 흐름과 게임 규칙은 [`games/README.md`](games/README.md)에 있어요.
+
+**한 번만 설정하면 돼요 (사이트 설정 1~6번을 마친 뒤)**
+
+1. **공식 계정 만들기**: 사이트에서 새 이메일로 가입하고, 닉네임(예: `노라라 공식`)과 나이 확인까지 마쳐요.
+2. **공식 표시 켜기**: Supabase SQL Editor에서:
+   ```sql
+   update public.profiles set is_official = true where nickname = '노라라 공식';
+   ```
+3. **GitHub에 값 넣기**: 저장소 Settings > Secrets and variables > Actions > **Secrets** 탭 > New repository secret으로 아래 9개를 넣어요.
+
+   | 이름 | 값 |
+   | --- | --- |
+   | `NEXT_PUBLIC_SUPABASE_URL` | `.env.local`과 같은 값 |
+   | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | `.env.local`과 같은 값 |
+   | `OFFICIAL_ACCOUNT_EMAIL` | 1번에서 가입한 이메일 |
+   | `OFFICIAL_ACCOUNT_PASSWORD` | 그 계정 비밀번호 |
+   | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | `.env.local`과 같은 값 |
+   | `NEXT_PUBLIC_GAME_ORIGIN` | `.env.local`과 같은 값 |
+
+4. Actions 탭 > **공식 게임 올리기** > Run workflow로 한 번 돌려봐요. 이미 합쳐진 게임이 있으면 이때 올라가요.
+
+설정 전에 게임 PR을 합쳐도 괜찮아요. 값이 없으면 업로드만 건너뛰고, 설정한 뒤 다음 실행 때 한꺼번에 올려요.
+올라간 게임은 다른 업로드와 똑같이 검수 워커(`npm run worker`)를 거쳐 공개돼요.
+
+**게임에 의견 주기**
+- 고칠 점: PR에 댓글로 적으면 다음 날 실행 때 고쳐서 같은 PR에 올려요.
+- 마음에 안 들면: PR을 Close 해요. 비슷한 게임은 다시 만들지 않아요.
+- 만들었으면 하는 게임: `games/IDEAS.md`의 "대기"에 한 줄로 적어요.
+- 검토 안 한 게임 PR이 3개 이상 쌓이면 새 게임은 쉬어요.
+
 ---
 
 ## 폴더 구조
@@ -136,9 +170,14 @@ components/            화면 조각 (게임 카드, 헤더, 업로드 폼 등)
 lib/                   Supabase·R2 연결, 상수
 proxy.ts               로그인 안 한 사람을 로그인 화면으로 보내요
 public/sdk.js          리더보드 SDK (게임 안에서 점수 보내기)
-scripts/review-worker.mjs  자동 검수 워커
+games/                 공식 게임 (에이전트 제작, 규칙은 games/README.md)
+scripts/review-worker.mjs        자동 검수 워커
+scripts/check-game.mjs           공식 게임 브라우저 검사
+scripts/publish-official-games.mjs  합쳐진 공식 게임을 사이트에 올리기
+scripts/lib/game-rules.mjs       검사 규칙 (위 세 스크립트가 같이 써요)
 supabase/migrations/   DB 테이블·권한·함수 (GitHub에 올리면 자동 적용)
-.github/workflows/     GitHub Actions (Supabase DB 자동 배포)
+.github/workflows/     GitHub Actions (Supabase DB 자동 배포, 공식 게임 올리기)
+.claude/               게임 스튜디오 에이전트(agents/)와 매일 루틴(routines/)
 ```
 
 ## 운영 규칙 숫자 바꾸기

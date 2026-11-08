@@ -1,0 +1,40 @@
+name: 공식 게임 올리기
+
+# 게임 PR이 main에 합쳐지면 공식 계정으로 사이트에 업로드해요.
+# 하루 업로드 한도에 걸려 못 올린 게임은 매일 아침 다시 시도해요.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "games/**"
+  schedule:
+    - cron: "17 0 * * *" # 매일 09:17 (한국 시간)
+  workflow_dispatch:
+
+concurrency:
+  group: official-games
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 게임을 처음 추가된 순서대로 올리려고 기록 전체를 받아요
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node scripts/publish-official-games.mjs
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          OFFICIAL_ACCOUNT_EMAIL: ${{ secrets.OFFICIAL_ACCOUNT_EMAIL }}
+          OFFICIAL_ACCOUNT_PASSWORD: ${{ secrets.OFFICIAL_ACCOUNT_PASSWORD }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          NEXT_PUBLIC_GAME_ORIGIN: ${{ secrets.NEXT_PUBLIC_GAME_ORIGIN }}
