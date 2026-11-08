@@ -222,7 +222,8 @@ async function runBrowserChecks() {
       await page.waitForTimeout(60 + rand(140));
       await page.keyboard.up(k);
       if (Math.random() < 0.25) await page.mouse.click(40 + rand(720), 40 + rand(520));
-      if (!mid && Date.now() - t0 > 2500) {
+      // 썸네일로도 쓰는 장면이라 화면에 게임 요소가 충분히 나온 뒤(5초)에 찍어요
+      if (!mid && Date.now() - t0 > 5000) {
         mid = await page.screenshot({ path: join(outDir, "pc-play.png") });
         shots.desktopPlay = join(outDir, "pc-play.png");
       }
