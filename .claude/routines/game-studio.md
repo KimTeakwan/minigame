@@ -8,9 +8,9 @@
 - `git fetch origin --prune`, `main` 체크아웃, `origin/main`으로 fast-forward. 새 게임은 항상 `origin/main`에서 시작한다.
 - 오늘 날짜: `TZ=Asia/Seoul date +%Y%m%d`
 - 열린 게임 PR 목록 (GraphQL은 안 되니 REST로):
-  `gh api "repos/KimTeakwan/minigame/pulls?state=open&per_page=100" --jq '.[] | select(.head.ref | startswith("game/")) | {number, title, head: .head.ref, created_at}'`
+  `gh api "repos/KimTeakwan/minigame/pulls?state=open&per_page=100" --jq '.[] | select(.head.ref | startswith("game-")) | {number, title, head: .head.ref, created_at}'`
 - 병합 없이 닫힌 게임 PR(소유자가 거절한 게임):
-  `gh api "repos/KimTeakwan/minigame/pulls?state=closed&per_page=50" --jq '.[] | select(.head.ref | startswith("game/")) | select(.merged_at == null) | .title'`
+  `gh api "repos/KimTeakwan/minigame/pulls?state=closed&per_page=50" --jq '.[] | select(.head.ref | startswith("game-")) | select(.merged_at == null) | .title'`
 
 ## 1. 피드백 반영 (먼저)
 열린 게임 PR마다, 그 브랜치의 마지막 커밋 이후에 소유자(`KimTeakwan`)가 남긴 댓글이 있는지 본다.
@@ -32,15 +32,15 @@
 
 ## 3. 새 게임 만들기
 1. **기획**: 기획 에이전트에게 열린 PR 목록(각 PR 브랜치의 `games/*/game.json`도 `git show origin/<브랜치>:games/<slug>/game.json`으로 넘긴다)과 거절된 PR 제목을 넘기고 기획서를 받는다. slug가 main과 열린 PR 어디에도 없는지 확인한다.
-2. **브랜치**: `git worktree add -b game/<slug>-<YYYYMMDD> /tmp/studio/game-<slug> origin/main` — 이후 작업은 이 폴더에서만 한다.
+2. **브랜치**: `git worktree add -b game-<slug>-<YYYYMMDD> /tmp/studio/game-<slug> origin/main` — 이후 작업은 이 폴더에서만 한다. 브랜치 이름에 `/`를 넣지 않는다 (PR의 바로 플레이 링크 주소가 헷갈려요).
 3. **제작**: 개발 에이전트에게 기획서를 넘긴다.
 4. **검수**: 검수 에이전트가 판정한다. FAIL이면 사유를 개발 에이전트에게 넘겨 고치고 다시 검수한다. **최대 3번**. 3번째도 FAIL이면 push하지 않고, 마지막 요약에 게임 이름과 FAIL 사유를 적고 끝낸다.
 5. **썸네일**: PASS면 `node scripts/check-game.mjs games/<slug>`를 한 번 더 돌려 `thumbnail.png`를 찍는다. 썸네일 스크린샷을 Read로 열어 게임이 잘 보이는 장면인지 본다 (게임 오버 화면이나 빈 화면이면 다시 돌린다).
 6. **커밋**: `games/<slug>/` 폴더 3개 파일만 커밋한다 (`index.html`, `game.json`, `thumbnail.png`). 커밋 메시지: `게임 추가: <제목>`.
-7. **push**: `git push -u origin game/<slug>-<YYYYMMDD>`
+7. **push**: `git push -u origin game-<slug>-<YYYYMMDD>`
 8. **PR**: 아래 형식으로 본문을 파일에 쓰고 REST로 연다.
-   `gh api repos/KimTeakwan/minigame/pulls -f title="[게임] <제목>" -f head="game/<slug>-<YYYYMMDD>" -f base=main -F body=@/tmp/studio/pr-body.md`
-   PR을 열 수 없으면 브랜치만 push하고, 요약에 `https://github.com/KimTeakwan/minigame/compare/main...game/<slug>-<YYYYMMDD>?expand=1` 링크를 적는다.
+   `gh api repos/KimTeakwan/minigame/pulls -f title="[게임] <제목>" -f head="game-<slug>-<YYYYMMDD>" -f base=main -F body=@/tmp/studio/pr-body.md`
+   PR을 열 수 없으면 브랜치만 push하고, 요약에 `https://github.com/KimTeakwan/minigame/compare/main...game-<slug>-<YYYYMMDD>?expand=1` 링크를 적는다.
 
 ### PR 본문 형식
 
