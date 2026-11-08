@@ -21,6 +21,15 @@ AI로 만든 HTML 미니게임을 누구나 올리고 회원들이 플레이하�
 - 플레이수: 같은 유저는 게임당 하루(한국 시간) 1회만
 - 알림: 사이트 내 알림만 (이메일 없음)
 - 리더보드: 게임이 `public/sdk.js`의 `GameSDK.submitScore()` 호출 → postMessage → 플레이 페이지 → `submit_score` RPC
+- 공식 게임: 에이전트가 매일 1개 만들어 PR로 올리고, 소유자가 PR에서 검토·병합하면 공식 계정으로 업로드. 공식 계정 게임에는 '공식' 배지
+
+## 공식 게임 (에이전트 제작)
+- 게임 파일: `games/<slug>/` (`index.html` 한 파일 + `game.json` + `thumbnail.png`). 규칙은 `games/README.md`, 뼈대는 `games/_template/`
+- 루틴: `.claude/routines/game-studio.md` (매일 예약 작업). 에이전트: `.claude/agents/game-planner.md`, `game-developer.md`, `game-qa.md`
+- 검사: `node scripts/check-game.mjs games/<slug>` — 실제 브라우저로 사이트와 같은 sandbox iframe에서 PC·휴대폰 크기로 켜봐요
+- 업로드: main에 `games/**`가 합쳐지면 `.github/workflows/official-games.yml` → `scripts/publish-official-games.mjs`. 공식 계정 이메일·비밀번호로 로그인해서 일반 회원과 같은 RPC를 써요 (service_role 키 안 씀)
+- 공식 표시: `profiles.is_official` (SQL Editor에서만 바꿈). 카드는 `published_games.uploader_is_official`
+- 업로드 검사 패턴은 `scripts/lib/game-rules.mjs` 한 곳에서 관리해요 (워커·검사·업로드가 같이 씀)
 
 ## 코드 규칙
 - 화면 문구는 한국어, 해요체.

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import AdSlot from "@/components/AdSlot";
+import OfficialBadge from "@/components/OfficialBadge";
 import GamePlayer from "@/components/game/GamePlayer";
 import CommentsAndBoard, { type CommentRow } from "@/components/game/CommentsAndBoard";
 import { CARD_COLUMNS, CONTROL_LABELS, aiToolLabel, gameFileUrl } from "@/lib/constants";
@@ -21,7 +22,7 @@ export default async function GamePage({ params }: { params: Params }) {
   const { data: game } = await supabase
     .from("games")
     .select(
-      "id,title,description,howto,tags,controls,ai_tool,status,reject_reason,storage_path,leaderboard_enabled,score_order,play_count,like_count,created_at,uploader_id,category_id,category:categories(name),uploader:profiles!games_uploader_id_fkey(nickname)",
+      "id,title,description,howto,tags,controls,ai_tool,status,reject_reason,storage_path,leaderboard_enabled,score_order,play_count,like_count,created_at,uploader_id,category_id,category:categories(name),uploader:profiles!games_uploader_id_fkey(nickname,is_official)",
     )
     .eq("id", id)
     .maybeSingle();
@@ -29,7 +30,7 @@ export default async function GamePage({ params }: { params: Params }) {
   if (!game || game.status === "deleted") notFound();
 
   // DB 타입을 생성하지 않아서 supabase-js가 연결된 줄을 배열로 추정해요. 실제로는 객체 하나가 와요.
-  const uploader = game.uploader as unknown as { nickname: string | null } | null;
+  const uploader = game.uploader as unknown as { nickname: string | null; is_official: boolean } | null;
   const category = game.category as unknown as { name: string } | null;
   const uploaderNickname: string = uploader?.nickname ?? "알 수 없음";
   const categoryName: string | null = category?.name ?? null;
@@ -124,6 +125,7 @@ export default async function GamePage({ params }: { params: Params }) {
                   {uploaderNickname.charAt(0)}
                 </span>
                 {uploaderNickname}
+                {uploader?.is_official && <OfficialBadge />}
               </Link>
               <span>플레이 {game.play_count.toLocaleString()}회</span>
               <span>좋아요 {game.like_count.toLocaleString()}</span>

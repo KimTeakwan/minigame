@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import GameCard from "@/components/GameCard";
+import OfficialBadge from "@/components/OfficialBadge";
 import SortTabs, { parseSort } from "@/components/SortTabs";
 import ProfileEditor from "@/components/profile/ProfileEditor";
 import { CARD_COLUMNS, CONTROL_LABELS, type SortKey } from "@/lib/constants";
@@ -43,7 +44,7 @@ export default async function ProfilePage({ params, searchParams }: { params: Pa
 
   const { data: profile } = await supabase
     .from("profiles")
-    .select("id,nickname,bio,created_at,status,strike_count,suspended_until")
+    .select("id,nickname,bio,created_at,status,strike_count,suspended_until,is_official")
     .eq("nickname", nickname)
     .maybeSingle();
   if (!profile) notFound();
@@ -89,7 +90,10 @@ export default async function ProfilePage({ params, searchParams }: { params: Pa
           {profile.nickname.charAt(0)}
         </span>
         <div className="flex min-w-0 flex-[1_1_360px] flex-col gap-2">
-          <h1 className="m-0 text-[28px] font-black leading-snug">{profile.nickname}</h1>
+          <h1 className="m-0 flex flex-wrap items-center gap-2 text-[28px] font-black leading-snug">
+            {profile.nickname}
+            {profile.is_official && <OfficialBadge />}
+          </h1>
           <p className="m-0 whitespace-pre-line text-body">{profile.bio || "자기소개가 아직 없어요."}</p>
           <div className="flex flex-wrap gap-5 text-sm text-muted">
             <span>
