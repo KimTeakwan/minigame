@@ -708,6 +708,8 @@ let last = now();
 function loop(t) {
   const dt = Math.min(0.05, (t - last) / 1000);
   last = t;
+  // iframe 크기가 늦게 잡히면 resize 이벤트가 안 올 수 있어서 매 프레임 확인해요
+  if (window.innerWidth !== W || window.innerHeight !== H) resize();
   update(dt);
   draw();
   requestAnimationFrame(loop);
