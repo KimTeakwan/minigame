@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>도시락 수비대</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #b9dd98; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #mute {
+    position: fixed; top: 10px; right: 10px; width: 44px; height: 44px; border: 0; border-radius: 12px;
+    background: rgba(40, 70, 20, .18); color: #2f4a17; font-size: 20px; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="mute" aria-label="소리 끄기">🔊</button>
+<script>
+/* ===== 게임 SDK: 리더보드 + 멀티 (public/sdk.js와 같은 코드) ===== */
+(function () {
+  var sent = false;
+  var standalone = window.parent === window; // 파일을 직접 열었을 때
+  var listeners = { message: [], players: [], emote: [], error: [] };
+  var room = { joined: false, roomId: null, me: null, players: [], hostId: null, maxPlayers: 0 };
+  var waiting = [];
+
+  function post(msg) {
+    if (!standalone) window.parent.postMessage(msg, "*");
+  }
+  function emit(name, a, b) {
+    var list = listeners[name] || [];
+    for (var i = 0; i < list.length; i++) {
+      try { list[i](a, b); } catch (e) { setTimeout(function () { throw e; }); }
+    }
+  }
+  function settle(ok, value) {
+    var list = waiting;
+    waiting = [];
+    for (var i = 0; i < list.length; i++) {
+      clearTimeout(list[i].timer);
+      ok ? list[i].resolve(value) : list[i].reject(new Error(value));
+    }
+  }
+
+  window.addEventListener("message", function (event) {
+    if (standalone || event.source !== window.parent) return; // 바깥 플레이 페이지에서 온 것만
+    var m = event.data;
+    if (!m || typeof m !== "object") return;
+    if (m.type === "GAMESDK_MP_JOINED") {
+      room = { joined: true, roomId: m.roomId, me: m.me, players: m.players || [], hostId: m.hostId, maxPlayers: m.maxPlayers };
+      settle(true, { roomId: room.roomId, me: room.me, players: room.players, hostId: room.hostId, maxPlayers: room.maxPlayers });
+      emit("players", room.players, room.hostId);
+    } else if (m.type === "GAMESDK_MP_PLAYERS") {
+      room.players = m.players || [];
+      room.hostId = m.hostId;
+      emit("players", room.players, room.hostId);
+    } else if (m.type === "GAMESDK_MP_MESSAGE") {
+      emit("message", m.data, m.from);
+    } else if (m.type === "GAMESDK_MP_EMOTE") {
+      emit("emote", m.key, m.from);
+    } else if (m.type === "GAMESDK_MP_ERROR") {
+      if (!room.joined) settle(false, m.message);
+      emit("error", m.message);
+    }
+  });
+
+  window.GameSDK = {
+    submitScore: function (score) {
+      if (sent) return; // 한 판에 한 번만
+      if (typeof score !== "number" || !isFinite(score)) return;
+      sent = true;
+      post({ type: "GAMESDK_SCORE", score: score });
+    },
+    // 새 판을 시작할 때 부르면 다시 점수를 보낼 수 있어요.
+    newRound: function () {
+      sent = false;
+      post({ type: "GAMESDK_NEW_ROUND" });
+    },
+    multi: {
+      join: function () {
+        return new Promise(function (resolve, reject) {
+          if (standalone) return reject(new Error("사이트 밖에서는 멀티를 쓸 수 없어요"));
+          var w = { resolve: resolve, reject: reject, timer: 0 };
+          w.timer = setTimeout(function () {
+            waiting = waiting.filter(function (x) { return x !== w; });
+            reject(new Error("방에 들어가지 못했어요 (응답 없음)"));
+          }, 8000);
+          waiting.push(w);
+          post({ type: "GAMESDK_MP_JOIN" });
+        });
+      },
+      send: function (data) { if (room.joined) post({ type: "GAMESDK_MP_SEND", data: data }); },
+      emote: function (key) { if (room.joined) post({ type: "GAMESDK_MP_EMOTE", key: key }); },
+      lock: function (locked) { if (room.joined) post({ type: "GAMESDK_MP_LOCK", locked: locked !== false }); },
+      leave: function () {
+        if (!room.joined) return;
+        room = { joined: false, roomId: null, me: null, players: [], hostId: null, maxPlayers: 0 };
+        post({ type: "GAMESDK_MP_LEAVE" });
+      },
+      on: function (name, fn) { if (listeners[name] && typeof fn === "function") listeners[name].push(fn); },
+      me: function () { return room.me; },
+      players: function () { return room.players.slice(); },
+      hostId: function () { return room.hostId; },
+      isHost: function () { return !!room.me && room.me.id === room.hostId; },
+    },
+  };
+})();
+
+/* =====================================================================
+   도시락 수비대 — 도시락으로 몰려드는 개미·파리·비둘기를 부채로 쫓아내요.
+   한 번 휘둘러 여러 마리를 쫓으면 점수가 곱절! 반찬 6개를 다 뺏기면 끝나요.
+   (벌레를 해치지 않아요. 부채 바람에 슝~ 날아가요)
+   ===================================================================== */
+
+/* ===== 화면 ===== */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, U = 1, CX = 0, CY = 0;
+let tufts = [];
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  U = Math.min(W, H) / 100;
+  CX = W / 2; CY = H / 2 + Math.min(4 * U, 20);
+  // 잔디 무늬는 크기가 바뀔 때만 다시 만들어요
+  tufts = [];
+  const n = Math.round((W * H) / 9000);
+  for (let i = 0; i < n; i++) tufts.push({ x: Math.random() * W, y: Math.random() * H, s: 0.6 + Math.random() * 0.8 });
+}
+window.addEventListener("resize", resize);
+resize();
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rnd = (a, b) => a + Math.random() * (b - a);
+const now = () => performance.now();
+const coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+
+/* ===== 소리 ===== */
+let audio = null, muted = false;
+function tone(freq, dur = 0.08, type = "triangle", vol = 0.07, when = 0, slide = 0) {
+  if (!audio || muted) return;
+  const t = audio.currentTime + when, o = audio.createOscillator(), g = audio.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(40, freq + slide), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(audio.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function whoosh() {
+  if (!audio || muted) return;
+  const len = 0.16, buf = audio.createBuffer(1, Math.floor(audio.sampleRate * len), audio.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+  const src = audio.createBufferSource(), f = audio.createBiquadFilter(), g = audio.createGain();
+  f.type = "bandpass"; f.frequency.value = 900; f.Q.value = 0.8; g.gain.value = 0.12;
+  src.buffer = buf; src.connect(f).connect(g).connect(audio.destination); src.start();
+}
+function unlockAudio() {
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audio = null; } }
+  if (audio && audio.state === "suspended") audio.resume();
+}
+const sfx = {
+  swing: whoosh,
+  hit: (n) => tone(520 + n * 120, 0.09, "square", 0.06, 0, 300),
+  bonk: () => tone(180, 0.1, "square", 0.06),
+  eat: () => { tone(220, 0.12, "sawtooth", 0.06); tone(160, 0.16, "sawtooth", 0.05, 0.08); },
+  power: () => [660, 880, 1100, 1320].forEach((f, i) => tone(f, 0.1, "triangle", 0.06, i * 0.05)),
+  refill: () => [523, 784].forEach((f, i) => tone(f, 0.12, "triangle", 0.06, i * 0.08)),
+  start: () => [440, 660, 880].forEach((f, i) => tone(f, 0.09, "triangle", 0.06, i * 0.07)),
+  over: () => [392, 330, 262, 196].forEach((f, i) => tone(f, 0.2, "triangle", 0.07, i * 0.15)),
+};
+const muteBtn = document.getElementById("mute");
+muteBtn.addEventListener("pointerdown", (e) => {
+  e.stopPropagation(); muted = !muted;
+  muteBtn.textContent = muted ? "🔇" : "🔊";
+  muteBtn.setAttribute("aria-label", muted ? "소리 켜기" : "소리 끄기");
+});
+
+/* ===== 게임 상태 ===== */
+const PEST = {
+  ant:    { r: 2.6, speed: 9,  score: 10,  hp: 1 },
+  fly:    { r: 2.4, speed: 15, score: 20,  hp: 1 },
+  pigeon: { r: 5.5, speed: 6.5, score: 100, hp: 3 },
+};
+const DISH_COLORS = ["#f6c945", "#e2553f", "#fbfaf4", "#4caf50", "#e8323a", "#e59a3a"];
+let state = "title"; // title | play | over
+let score = 0, best = 0, shooed = 0, elapsed = 0, overAt = 0;
+let dishes = [];       // 반찬 6칸 (true면 남아 있음)
+let pests = [], particles = [], popups = [];
+let spawnTimer = 0, pigeonTimer = 0, refillTimer = 0, powerTimer = 0;
+let powerUp = null;    // 바닥에 놓인 큰 부채 {x, y, t}
+let bigFan = 0;        // 큰 부채 남은 시간
+let shake = 0, flash = 0, hitstop = 0, banner = null;
+const player = { x: 0, y: 0, face: -Math.PI / 2, swing: 0, swingDir: 0, cool: 0 };
+
+function startGame() {
+  if (state === "over") GameSDK.newRound();
+  state = "play";
+  score = 0; shooed = 0; elapsed = 0;
+  dishes = [true, true, true, true, true, true];
+  pests = []; particles = []; popups = [];
+  spawnTimer = 1; pigeonTimer = 35; refillTimer = 25; powerTimer = 18;
+  powerUp = null; bigFan = 0; shake = 0; flash = 0; banner = null;
+  player.x = CX; player.y = CY - 18 * U; player.face = -Math.PI / 2; player.swing = 0; player.cool = 0;
+  sfx.start();
+}
+function endGame() {
+  state = "over"; overAt = now();
+  best = Math.max(best, score);
+  GameSDK.submitScore(score);
+  sfx.over();
+}
+const dishesLeft = () => dishes.filter(Boolean).length;
+const reach = () => (bigFan > 0 ? 25 : 16) * U;
+
+function spawnPest(type) {
+  // 화면 밖 아무 가장자리에서 들어와요
+  const side = Math.floor(Math.random() * 4), m = 6 * U;
+  let x, y;
+  if (side === 0) { x = rnd(0, W); y = -m; } else if (side === 1) { x = W + m; y = rnd(0, H); }
+  else if (side === 2) { x = rnd(0, W); y = H + m; } else { x = -m; y = rnd(0, H); }
+  const k = PEST[type];
+  const speedUp = Math.min(1.8, 1 + elapsed * 0.006);
+  pests.push({ type, x, y, r: k.r * U, hp: k.hp, speed: k.speed * U * speedUp * rnd(0.9, 1.1), mode: "walk", vx: 0, vy: 0, spin: 0, rot: 0, life: 0, phase: rnd(0, 6), hurt: 0 });
+}
+
+/* ===== 입력 ===== */
+const keys = new Set();
+const stick = { id: null, ox: 0, oy: 0, dx: 0, dy: 0 }; // 휴대폰 왼쪽 반: 가상 조이스틱
+let aimAt = null; // 마우스 클릭으로 휘두를 때 그쪽을 향해요
+window.addEventListener("keydown", (e) => {
+  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " "].includes(e.key)) e.preventDefault();
+  unlockAudio();
+  const k = e.key.toLowerCase();
+  if (!keys.has(k) && (k === " " || k === "enter" || k === "j" || k === "k")) press();
+  keys.add(k);
+});
+window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+canvas.addEventListener("pointerdown", (e) => {
+  unlockAudio();
+  if (state !== "play") { press(); return; }
+  if (e.pointerType === "touch" && e.clientX < W / 2) {
+    stick.id = e.pointerId; stick.ox = e.clientX; stick.oy = e.clientY; stick.dx = 0; stick.dy = 0;
+  } else {
+    if (e.pointerType === "mouse") aimAt = { x: e.clientX, y: e.clientY };
+    swing();
+  }
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (e.pointerId !== stick.id) return;
+  const max = 12 * U, dx = e.clientX - stick.ox, dy = e.clientY - stick.oy, d = Math.hypot(dx, dy);
+  const k = d > max ? max / d : 1;
+  stick.dx = dx * k / max; stick.dy = dy * k / max;
+});
+function endStick(e) { if (e.pointerId === stick.id) { stick.id = null; stick.dx = 0; stick.dy = 0; } }
+window.addEventListener("pointerup", endStick);
+window.addEventListener("pointercancel", endStick);
+
+function press() {
+  if (state === "title") return startGame();
+  if (state === "over") { if (now() - overAt > 800) startGame(); return; }
+  swing();
+}
+
+/* ===== 부채 휘두르기 ===== */
+function swing() {
+  if (state !== "play" || player.cool > 0) return;
+  // 방향: 마우스로 누른 곳 → 가까운 벌레(자동 조준) → 바라보는 쪽
+  let dir = player.face;
+  if (aimAt) { dir = Math.atan2(aimAt.y - player.y, aimAt.x - player.x); aimAt = null; }
+  else {
+    let bestD = reach() * 1.4, target = null;
+    for (const p of pests) if (p.mode === "walk") { const d = Math.hypot(p.x - player.x, p.y - player.y); if (d < bestD) { bestD = d; target = p; } }
+    if (target) dir = Math.atan2(target.y - player.y, target.x - player.x);
+  }
+  player.face = dir; player.swingDir = dir; player.swing = 0.2; player.cool = 0.3;
+  sfx.swing();
+
+  const R = reach(), hits = [];
+  for (const p of pests) {
+    if (p.mode !== "walk") continue;
+    const dx = p.x - player.x, dy = p.y - player.y, d = Math.hypot(dx, dy);
+    if (d > R + p.r) continue;
+    let diff = Math.abs(Math.atan2(dy, dx) - dir);
+    if (diff > Math.PI) diff = Math.PI * 2 - diff;
+    if (d < p.r + 3 * U || diff < (80 * Math.PI) / 180) hits.push(p);
+  }
+  if (!hits.length) return;
+  let shooedNow = 0, gained = 0;
+  for (const p of hits) {
+    const a = Math.atan2(p.y - player.y, p.x - player.x);
+    p.hp--;
+    if (p.hp > 0) { // 비둘기: 뒤로 밀려나요
+      p.x += Math.cos(a) * 8 * U; p.y += Math.sin(a) * 8 * U; p.hurt = 0.25;
+      sfx.bonk(); popup(p.x, p.y - p.r - 10, `${p.hp}번 더!`, "#ffffff", 16);
+      continue;
+    }
+    shooedNow++;
+    p.mode = "flee"; p.vx = Math.cos(a) * 70 * U; p.vy = Math.sin(a) * 70 * U; p.spin = rnd(10, 20) * (Math.random() < 0.5 ? -1 : 1);
+    gained += PEST[p.type].score;
+    burst(p.x, p.y, "#ffffff", 8);
+  }
+  if (shooedNow) {
+    const mult = shooedNow; // 한 번에 여러 마리면 곱절
+    score += gained * mult; shooed += shooedNow;
+    popup(player.x + Math.cos(dir) * R * 0.6, player.y + Math.sin(dir) * R * 0.6 - 10,
+      mult > 1 ? `${mult}마리 한 번에! +${gained * mult}` : `+${gained}`, mult > 1 ? "#c2410c" : "#2f4a17", mult > 1 ? 22 : 18);
+    sfx.hit(shooedNow);
+    hitstop = 0.05; shake = Math.min(0.25, 0.08 + 0.05 * shooedNow);
+  }
+}
+
+/* ===== 업데이트 ===== */
+function update(dt) {
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.96; p.vy *= 0.96; p.life -= dt; }
+  particles = particles.filter((p) => p.life > 0);
+  for (const p of popups) { p.y -= 40 * dt; p.life -= dt; }
+  popups = popups.filter((p) => p.life > 0);
+  shake = Math.max(0, shake - dt); flash = Math.max(0, flash - dt);
+  if (banner) { banner.life -= dt; if (banner.life <= 0) banner = null; }
+  player.swing = Math.max(0, player.swing - dt);
+  if (state !== "play") return;
+  if (hitstop > 0) { hitstop -= dt; return; } // 맞힌 순간 아주 잠깐 멈춰요 (손맛)
+
+  elapsed += dt;
+  player.cool = Math.max(0, player.cool - dt);
+  bigFan = Math.max(0, bigFan - dt);
+
+  // 움직이기
+  let mx = 0, my = 0;
+  if (keys.has("arrowleft") || keys.has("a")) mx -= 1;
+  if (keys.has("arrowright") || keys.has("d")) mx += 1;
+  if (keys.has("arrowup") || keys.has("w")) my -= 1;
+  if (keys.has("arrowdown") || keys.has("s")) my += 1;
+  if (stick.id !== null) { mx = stick.dx; my = stick.dy; }
+  const len = Math.hypot(mx, my);
+  if (len > 0.15) {
+    const k = Math.min(1, len) / len, speed = 42 * U;
+    player.x += mx * k * speed * dt; player.y += my * k * speed * dt;
+    if (player.swing <= 0) player.face = Math.atan2(my, mx);
+  }
+  player.x = clamp(player.x, 4 * U, W - 4 * U); player.y = clamp(player.y, 4 * U, H - 4 * U);
+
+  // 벌레 나타나기 (점점 많이·빨리)
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    const flyChance = elapsed < 12 ? 0 : Math.min(0.45, (elapsed - 12) * 0.01);
+    spawnPest(Math.random() < flyChance ? "fly" : "ant");
+    if (elapsed > 50 && Math.random() < 0.3) spawnPest("ant");
+    spawnTimer = Math.max(0.42, 1.5 - elapsed * 0.012) * rnd(0.8, 1.2);
+  }
+  pigeonTimer -= dt;
+  if (pigeonTimer <= 0) { spawnPest("pigeon"); banner = { text: "비둘기가 와요! 세 번 쫓아내요", life: 1.8 }; pigeonTimer = rnd(26, 34); }
+  // 반찬 리필 (잘 지키면 오래 버틸 수 있어요)
+  refillTimer -= dt;
+  if (refillTimer <= 0) {
+    refillTimer = 25;
+    const empty = dishes.indexOf(false);
+    if (empty >= 0) { dishes[empty] = true; banner = { text: "반찬 리필! +1", life: 1.4 }; sfx.refill(); }
+  }
+  // 큰 부채 아이템
+  powerTimer -= dt;
+  if (powerTimer <= 0 && !powerUp) {
+    const a = rnd(0, Math.PI * 2), d = rnd(18, 30) * U;
+    powerUp = { x: clamp(CX + Math.cos(a) * d, 8 * U, W - 8 * U), y: clamp(CY + Math.sin(a) * d, 8 * U, H - 8 * U), t: 8 };
+    powerTimer = rnd(20, 26);
+  }
+  if (powerUp) {
+    powerUp.t -= dt;
+    if (Math.hypot(powerUp.x - player.x, powerUp.y - player.y) < 7 * U) {
+      bigFan = 8; powerUp = null; sfx.power(); banner = { text: "큰 부채! 8초 동안 넓게 휘둘러요", life: 1.6 };
+    } else if (powerUp.t <= 0) powerUp = null;
+  }
+
+  // 벌레 움직이기
+  const boxR = 9 * U;
+  for (const p of pests) {
+    p.life += dt; p.hurt = Math.max(0, p.hurt - dt);
+    if (p.mode === "walk") {
+      const dx = CX - p.x, dy = CY - p.y, d = Math.hypot(dx, dy);
+      let ux = dx / d, uy = dy / d;
+      if (p.type === "fly") { // 파리는 지그재그로 날아와요
+        const wob = Math.sin(p.life * 6 + p.phase) * 0.9;
+        const ox = -uy * wob, oy = ux * wob;
+        ux += ox; uy += oy; const l = Math.hypot(ux, uy); ux /= l; uy /= l;
+      }
+      p.x += ux * p.speed * dt; p.y += uy * p.speed * dt; p.rot = Math.atan2(uy, ux);
+      if (d < boxR) eatDish(p);
+    } else {
+      p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.spin * dt;
+    }
+  }
+  pests = pests.filter((p) => p.mode === "walk" || (p.x > -20 * U && p.x < W + 20 * U && p.y > -20 * U && p.y < H + 20 * U));
+}
+
+function eatDish(p) {
+  const left = dishes.map((v, i) => (v ? i : -1)).filter((i) => i >= 0);
+  if (left.length) dishes[left[Math.floor(Math.random() * left.length)]] = false;
+  // 반찬을 물고 도망가요
+  const a = rnd(0, Math.PI * 2);
+  p.mode = "flee"; p.vx = Math.cos(a) * 30 * U; p.vy = Math.sin(a) * 30 * U; p.spin = 0; p.carry = true;
+  flash = 0.25; shake = 0.2;
+  popup(CX, CY - 12 * U, "냠! 반찬을 뺏겼어요", "#c2410c", 18);
+  sfx.eat();
+  if (!dishesLeft()) endGame();
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n && particles.length < 160; i++) {
+    const a = rnd(0, Math.PI * 2), s = rnd(20, 60) * U;
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rnd(0.25, 0.5), color, size: rnd(0.4, 0.9) * U });
+  }
+}
+function popup(x, y, text, color, size = 18) {
+  if (popups.length >= 16) return;
+  for (const p of popups) if (p.life > 0.5 && Math.abs(p.x - x) < 100 && Math.abs(p.y - y) < size * 1.2) y = p.y - size * 1.3;
+  popups.push({ x, y, text, color, size, life: 0.9 });
+}
+
+/* ===== 그리기 ===== */
+function draw() {
+  const t = now() / 1000;
+  ctx.save();
+  if (shake > 0) ctx.translate(rnd(-1, 1) * shake * 30, rnd(-1, 1) * shake * 30);
+  // 잔디
+  ctx.fillStyle = "#b9dd98"; ctx.fillRect(-40, -40, W + 80, H + 80);
+  ctx.strokeStyle = "rgba(60,110,30,.35)"; ctx.lineWidth = 2;
+  for (const g of tufts) { ctx.beginPath(); ctx.moveTo(g.x - 3 * g.s, g.y); ctx.lineTo(g.x, g.y - 7 * g.s); ctx.lineTo(g.x + 3 * g.s, g.y); ctx.stroke(); }
+  // 돗자리 + 도시락
+  drawBlanket(); drawBox();
+  if (powerUp) drawPowerUp(powerUp.x, powerUp.y, t);
+  for (const p of pests) drawPest(p, t);
+  drawPlayer(t);
+  for (const p of particles) { ctx.globalAlpha = Math.max(0, p.life * 2); circle(p.x, p.y, p.size, p.color); }
+  ctx.globalAlpha = 1;
+  for (const p of popups) { ctx.globalAlpha = Math.min(1, p.life * 2); text(p.text, p.x, p.y, p.size, "center", "900", p.color, true); }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  if (flash > 0) { ctx.fillStyle = `rgba(200,60,30,${flash * 0.5})`; ctx.fillRect(0, 0, W, H); }
+  if (state === "play") { drawHud(); drawTouchHints(); }
+  if (banner) { ctx.globalAlpha = Math.min(1, banner.life * 2); text(banner.text, W / 2, H * 0.24, clamp(U * 5, 18, 30), "center", "900", "#ffffff", true); ctx.globalAlpha = 1; }
+  if (state === "title") drawTitle(t);
+  if (state === "over") drawOver();
+}
+
+function drawBlanket() {
+  const s = 22 * U, x = CX - s, y = CY - s * 0.8, w = s * 2, h = s * 1.6, cell = w / 8;
+  ctx.save(); roundRect(x, y, w, h, 2 * U); ctx.fillStyle = "#fff"; ctx.fill(); ctx.clip();
+  ctx.fillStyle = "rgba(226,85,63,.55)"; for (let i = 0; i < 8; i += 2) ctx.fillRect(x + i * cell, y, cell, h);
+  ctx.fillStyle = "rgba(226,85,63,.35)"; for (let j = 0; j < 7; j += 2) ctx.fillRect(x, y + j * cell, w, cell);
+  ctx.restore();
+}
+function drawBox() {
+  const w = 16 * U, h = 11 * U, x = CX - w / 2, y = CY - h / 2;
+  ctx.fillStyle = "rgba(0,0,0,.18)"; roundRect(x + 0.6 * U, y + 1 * U, w, h, 1.6 * U); ctx.fill();
+  ctx.fillStyle = "#a8662f"; roundRect(x, y, w, h, 1.6 * U); ctx.fill();
+  const pad = 0.9 * U, cw = (w - pad * 4) / 3, ch = (h - pad * 3) / 2;
+  for (let i = 0; i < 6; i++) {
+    const cx = x + pad + (i % 3) * (cw + pad), cy = y + pad + Math.floor(i / 3) * (ch + pad);
+    ctx.fillStyle = "#7a4520"; roundRect(cx, cy, cw, ch, 0.8 * U); ctx.fill();
+    if (dishes[i]) {
+      const mx = cx + cw / 2, my = cy + ch / 2, r = Math.min(cw, ch) * 0.36;
+      if (i === 2) { circle(mx - r * 0.5, my, r * 0.7, "#fbfaf4"); circle(mx + r * 0.5, my, r * 0.7, "#fbfaf4"); circle(mx, my - r * 0.2, r * 0.7, "#fbfaf4"); }
+      else if (i === 3) { circle(mx, my, r, "#4caf50"); circle(mx - r * 0.4, my - r * 0.3, r * 0.5, "#66bb6a"); }
+      else if (i === 5) { circle(mx, my, r, "#22262a"); circle(mx, my, r * 0.75, "#fbfaf4"); circle(mx, my, r * 0.3, "#e85d3a"); }
+      else { ctx.fillStyle = DISH_COLORS[i]; roundRect(mx - r * 1.2, my - r * 0.7, r * 2.4, r * 1.4, r * 0.4); ctx.fill(); }
+    } else {
+      text("·", cx + cw / 2, cy + ch / 2, 12, "center", "900", "rgba(255,255,255,.3)");
+    }
+  }
+}
+function drawPowerUp(x, y, t) {
+  const r = 3.6 * U + Math.sin(t * 6) * 0.4 * U;
+  ctx.save(); ctx.translate(x, y);
+  ctx.shadowColor = "#ffd34d"; ctx.shadowBlur = 16;
+  ctx.fillStyle = "#ffcf3a"; ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, r, -Math.PI * 0.9, -Math.PI * 0.1); ctx.closePath(); ctx.fill();
+  ctx.shadowBlur = 0; ctx.strokeStyle = "#b8860b"; ctx.lineWidth = 2;
+  for (let i = 1; i < 5; i++) { const a = -Math.PI * 0.9 + (i * Math.PI * 0.8) / 5; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r); ctx.stroke(); }
+  ctx.fillStyle = "#8b4513"; ctx.fillRect(-0.4 * U, 0, 0.8 * U, 2.6 * U);
+  ctx.restore();
+  text("큰 부채", x, y + 5 * U, 14, "center", "900", "#7a5200", true);
+}
+function drawPest(p, t) {
+  ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+  if (p.mode === "flee") ctx.globalAlpha = 0.85;
+  const r = p.r;
+  if (p.type === "ant") {
+    ctx.strokeStyle = "#2a1a10"; ctx.lineWidth = Math.max(1.2, r * 0.18);
+    for (let i = -1; i <= 1; i++) { // 다리
+      const wig = Math.sin(t * 22 + i) * r * 0.3;
+      ctx.beginPath(); ctx.moveTo(i * r * 0.5, 0); ctx.lineTo(i * r * 0.5 + wig, -r * 1.1); ctx.moveTo(i * r * 0.5, 0); ctx.lineTo(i * r * 0.5 - wig, r * 1.1); ctx.stroke();
+    }
+    circle(-r * 0.8, 0, r * 0.55, "#2a1a10"); circle(0, 0, r * 0.4, "#2a1a10"); circle(r * 0.75, 0, r * 0.45, "#3a2416");
+    if (p.carry) circle(r * 1.35, 0, r * 0.45, "#f6c945");
+  } else if (p.type === "fly") {
+    const flap = Math.abs(Math.sin(t * 40)) * 0.8 + 0.3;
+    ctx.fillStyle = "rgba(220,235,255,.75)";
+    ctx.beginPath(); ctx.ellipse(-r * 0.1, -r * 0.8, r * 0.9, r * 0.45 * flap, -0.4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(-r * 0.1, r * 0.8, r * 0.9, r * 0.45 * flap, 0.4, 0, Math.PI * 2); ctx.fill();
+    circle(0, 0, r * 0.7, "#2b2f36"); circle(r * 0.6, 0, r * 0.42, "#3b4048");
+    circle(r * 0.75, -r * 0.22, r * 0.18, "#b0302a"); circle(r * 0.75, r * 0.22, r * 0.18, "#b0302a");
+    if (p.carry) circle(r * 1.2, 0, r * 0.4, "#e2553f");
+  } else {
+    // 비둘기
+    const bob = Math.sin(t * 10) * r * 0.08;
+    ctx.fillStyle = p.hurt > 0 ? "#ffffff" : "#8d96a3"; ctx.beginPath(); ctx.ellipse(0, 0, r, r * 0.7, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#6f7885"; ctx.beginPath(); ctx.ellipse(-r * 0.3, 0, r * 0.6, r * 0.5, 0, 0, Math.PI * 2); ctx.fill();
+    circle(r * 0.85 + bob, 0, r * 0.38, "#5f9b8f"); circle(r * 0.95 + bob, -r * 0.12, r * 0.08, "#111");
+    ctx.fillStyle = "#e0a040"; ctx.beginPath(); ctx.moveTo(r * 1.2 + bob, -r * 0.08); ctx.lineTo(r * 1.45 + bob, 0); ctx.lineTo(r * 1.2 + bob, r * 0.08); ctx.fill();
+  }
+  ctx.restore();
+  if (p.type === "pigeon" && p.mode === "walk") for (let i = 0; i < 3; i++) circle(p.x - 2 * U + i * 2 * U, p.y - p.r - 2 * U, 0.7 * U, i < p.hp ? "#c2410c" : "rgba(0,0,0,.2)");
+}
+function drawPlayer(t) {
+  const x = player.x, y = player.y, r = 4.2 * U;
+  // 휘두른 자국
+  if (player.swing > 0) {
+    const R = reach(), a = player.swingDir, k = player.swing / 0.2;
+    ctx.fillStyle = bigFan > 0 ? `rgba(255,215,80,${0.45 * k})` : `rgba(255,255,255,${0.5 * k})`;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.arc(x, y, R, a - 1.4, a + 1.4); ctx.closePath(); ctx.fill();
+  }
+  ctx.fillStyle = "rgba(0,0,0,.15)"; ctx.beginPath(); ctx.ellipse(x, y + r * 0.9, r * 0.9, r * 0.3, 0, 0, Math.PI * 2); ctx.fill();
+  circle(x, y, r, "#fffaf0"); ctx.strokeStyle = "#5a3214"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+  // 요리사 모자
+  circle(x - r * 0.35, y - r * 0.95, r * 0.42, "#ffffff"); circle(x + r * 0.35, y - r * 0.95, r * 0.42, "#ffffff"); circle(x, y - r * 1.15, r * 0.48, "#ffffff");
+  ctx.strokeStyle = "#d8d0c0"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x - r * 0.7, y - r * 0.62); ctx.lineTo(x + r * 0.7, y - r * 0.62); ctx.stroke();
+  // 얼굴 (바라보는 쪽)
+  const fx = Math.cos(player.face) * r * 0.25, fy = Math.sin(player.face) * r * 0.2;
+  circle(x - r * 0.3 + fx, y - r * 0.05 + fy, r * 0.12, "#2a1a10"); circle(x + r * 0.3 + fx, y - r * 0.05 + fy, r * 0.12, "#2a1a10");
+  ctx.strokeStyle = "#2a1a10"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x + fx, y + r * 0.25 + fy, r * 0.25, 0.2 * Math.PI, 0.8 * Math.PI); ctx.stroke();
+  // 부채
+  const a = player.swing > 0 ? player.swingDir + (player.swing / 0.2 - 0.5) * 2.2 : player.face;
+  const hx = x + Math.cos(a) * r * 1.1, hy = y + Math.sin(a) * r * 1.1, fr = (bigFan > 0 ? 4.2 : 3) * U;
+  ctx.save(); ctx.translate(hx, hy); ctx.rotate(a);
+  ctx.fillStyle = bigFan > 0 ? "#ffcf3a" : "#e2553f";
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, fr, -0.7, 0.7); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 1.2;
+  for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(i * 0.28) * fr, Math.sin(i * 0.28) * fr); ctx.stroke(); }
+  ctx.restore();
+}
+function drawHud() {
+  const fs = clamp(U * 4.6, 16, 26), y = Math.max(30, fs * 1.4);
+  text(`${score}점`, 16, y, fs, "left", "900", "#2f4a17", true);
+  // 남은 반찬
+  const n = dishesLeft(), s = clamp(U * 3, 12, 18), gap = s * 1.35, x0 = W / 2 - gap * 2.5;
+  for (let i = 0; i < 6; i++) { ctx.fillStyle = i < n ? DISH_COLORS[i] : "rgba(0,0,0,.18)"; roundRect(x0 + i * gap - s / 2, y - s / 2, s, s, 3); ctx.fill(); }
+  text("남은 반찬", W / 2, y + s / 2 + 12, 14, "center", "700", "#2f4a17", true);
+  text(`${Math.floor(elapsed)}초`, W - 64, y, Math.max(14, fs * 0.8), "right", "800", "#2f4a17", true);
+  if (bigFan > 0) {
+    const w = 30 * U;
+    ctx.fillStyle = "rgba(0,0,0,.18)"; roundRect(W / 2 - w / 2, y + s / 2 + 24, w, 6, 3); ctx.fill();
+    ctx.fillStyle = "#ffcf3a"; roundRect(W / 2 - w / 2, y + s / 2 + 24, w * (bigFan / 8), 6, 3); ctx.fill();
+  }
+}
+function drawTouchHints() {
+  if (!coarse) return;
+  const r = Math.max(48, 10 * U);
+  ctx.globalAlpha = 0.5;
+  // 왼쪽: 조이스틱
+  const sx = stick.id !== null ? stick.ox : Math.max(r + 16, W * 0.18), sy = stick.id !== null ? stick.oy : H - r - 24;
+  ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2); ctx.stroke();
+  circle(sx + stick.dx * r * 0.6, sy + stick.dy * r * 0.6, r * 0.4, "#ffffff");
+  // 오른쪽: 휘두르기 버튼
+  const bx = W - Math.max(r + 16, W * 0.18), by = H - r - 24;
+  circle(bx, by, r, player.cool > 0 ? "rgba(255,255,255,.4)" : "#ffffff");
+  ctx.globalAlpha = 0.9;
+  text("휘두르기", bx, by, 15, "center", "900", "#2f4a17");
+  ctx.globalAlpha = 1;
+}
+function panel(w, h) {
+  const x = (W - w) / 2, y = (H - h) / 2;
+  ctx.fillStyle = "rgba(30,50,15,.45)"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#fffaf0"; roundRect(x, y, w, h, 18); ctx.fill();
+  return { x, y };
+}
+function drawTitle(t) {
+  const w = Math.min(W - 24, 460), h = Math.min(H - 40, 310), { y } = panel(w, h);
+  const big = clamp(w * 0.09, 26, 40), fs = clamp(w * 0.04, 14, 18);
+  text("도시락 수비대", W / 2, y + h * 0.15, big, "center", "900", "#2f4a17");
+  text("개미·파리·비둘기가 도시락을 노려요!", W / 2, y + h * 0.31, fs, "center", "700", "#2f4a17");
+  text("부채를 휘둘러 쫓아내요. 한 번에 여러 마리면 점수 곱절", W / 2, y + h * 0.43, Math.max(14, fs * 0.85), "center", "500", "#5a6a3a");
+  text(coarse ? "왼쪽을 끌어 이동 · 오른쪽을 탭해 휘두르기" : "방향키·WASD 이동 · 스페이스나 클릭으로 휘두르기", W / 2, y + h * 0.54, Math.max(14, fs * 0.85), "center", "500", "#5a6a3a");
+  const pulse = 0.9 + Math.sin(t * 3.3) * 0.1;
+  text("탭하거나 스페이스를 눌러 시작", W / 2, y + h * 0.74, fs * 1.15 * pulse, "center", "900", "#c2410c");
+  text("반찬 6개를 다 뺏기면 끝나요", W / 2, y + h * 0.88, 14, "center", "500", "#5a6a3a");
+}
+function drawOver() {
+  const w = Math.min(W - 24, 400), h = Math.min(H - 40, 300), { y } = panel(w, h);
+  const fs = clamp(w * 0.075, 22, 32);
+  text("도시락을 다 뺏겼어요!", W / 2, y + h * 0.16, fs, "center", "900", "#2f4a17");
+  text(`${score}점`, W / 2, y + h * 0.37, fs * 1.4, "center", "900", "#c2410c");
+  text(`최고 ${best}점`, W / 2, y + h * 0.54, 17, "center", "700", "#2f4a17");
+  text(`쫓아낸 벌레 ${shooed}마리 · ${Math.floor(elapsed)}초 버팀`, W / 2, y + h * 0.66, 15, "center", "500", "#5a6a3a");
+  if (now() - overAt > 800) text("탭하거나 스페이스를 눌러 다시 하기", W / 2, y + h * 0.85, 17, "center", "900", "#c2410c");
+}
+
+/* ===== 그리기 도구 ===== */
+function circle(x, y, r, color) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, Math.max(0.5, r), 0, Math.PI * 2); ctx.fill(); }
+function roundRect(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function text(s, x, y, size, align = "center", weight = "normal", color = "#fff", outline = false) {
+  ctx.textAlign = align; ctx.textBaseline = "middle";
+  ctx.font = `${weight} ${size}px -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`;
+  if (outline) { ctx.lineWidth = 4; ctx.strokeStyle = color === "#ffffff" ? "rgba(30,50,15,.7)" : "rgba(255,255,255,.75)"; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+
+/* ===== 메인 루프 ===== */
+let last = now();
+function loop(t) {
+  const dt = Math.min(0.05, (t - last) / 1000);
+  last = t;
+  // iframe 크기가 늦게 잡히면 resize 이벤트가 안 올 수 있어서 매 프레임 확인해요
+  if (window.innerWidth !== W || window.innerHeight !== H) resize();
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
