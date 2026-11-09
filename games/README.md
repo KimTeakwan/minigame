@@ -35,7 +35,9 @@ games/
   "leaderboard": true,
   "score_order": "desc",
   "ai_tool": "Claude",
-  "idea": "IDEAS.md에서 고른 줄 그대로 (직접 정한 아이디어면 이 항목은 빼요)"
+  "idea": "IDEAS.md에서 고른 줄 그대로 (직접 정한 아이디어면 이 항목은 빼요)",
+  "multiplayer": true,
+  "max_players": 4
 }
 ```
 
@@ -51,6 +53,8 @@ games/
 | `score_order` | 높을수록 좋으면 `desc`, 낮을수록 좋으면(시간 기록 등) `asc` |
 | `ai_tool` | 항상 `"Claude"` |
 | `idea` | 선택. `IDEAS.md`에서 고른 아이디어면 `- [ ] ` 뒤의 글을 그대로 적어요. 사이트에는 안 올라가요 |
+| `multiplayer` | 선택. 멀티 게임이면 `true` (아래 "멀티 게임" 규칙). 혼자 하는 게임이면 빼요 |
+| `max_players` | 멀티 게임만. 한 방 최대 인원 2~8 |
 
 ## 게임 규칙 (검사 스크립트가 확인해요)
 
@@ -79,6 +83,28 @@ games/
 - 장르는 자유롭게 빌려와도 되지만 이름·그림·캐릭터는 새로 만들어요.
 - 화면 글자는 한국어 해요체로 써요.
 
+## 멀티 게임
+
+로블록스처럼 같은 게임을 하는 사람들이 방(최대 `max_players`명)에 모여 같이 놀아요. 게임은 네트워크에 직접 접속하지 않고, SDK로 바깥 플레이 페이지에 메시지를 주면 페이지가 같은 방 사람들에게 전해줘요. SDK 사용법은 `public/sdk.js` 맨 위 설명에 있어요 (`_template`의 SDK 블록에 이미 들어 있어요).
+
+**꼭 지킬 것** (검사 스크립트와 실제 사이트가 막아요)
+- 메시지 하나는 JSON 2KB 이하, 한 사람이 1초에 10개까지. 위치는 1초에 5~8번만 보내고 그 사이는 부드럽게 이어 그려요.
+- 자유 채팅 금지. 글자 입력칸을 만들지 않아요. 대화는 이모티콘(`hi` `gg` `again` `wow` `oops` `thanks`)만 써요.
+- 다른 사람이 보낸 글자를 화면에 그대로 그리지 않아요. 이름은 SDK가 주는 닉네임만 써요.
+
+**혼자여도 놀 수 있어야 해요** (사이트 초반에는 사람이 적어요)
+- `GameSDK.multi.join()`이 실패하면(사이트 밖, 연결 실패) 바로 혼자/컴퓨터 상대 모드로 시작해요.
+- 방에 혼자면 "다른 플레이어를 기다리는 중 (1/4)"을 보여주고, 탭이나 스페이스로 바로 컴퓨터 상대와 시작할 수 있어요. 10초가 지나면 자동으로 시작해요.
+- 게임 중에 누가 들어오면 다음 판부터 같이 하거나, 그 자리의 컴퓨터를 사람으로 바꿔요. 나가면 컴퓨터가 이어받아요.
+
+**누가 판을 진행하나요**
+- 방장(`GameSDK.multi.isHost()`, 가장 먼저 들어온 사람)이 판 시작·타이머·아이템 생성·점수 판정을 맡고, 결과를 다른 사람에게 보내요.
+- 각자 자기 캐릭터의 위치·입력만 보내요. 방장이 나가면 다음 사람이 방장이 되니(`on("players")`), 진행 상태를 이어받을 수 있게 방장이 가끔 전체 상태를 보내요.
+- 판이 시작되면 `GameSDK.multi.lock(true)`로 방을 잠그고, 끝나면 `lock(false)`로 풀어요.
+- 리더보드 점수는 각자 자기 점수를 `submitScore`로 보내요.
+
+**미리보기**: `games/_preview/multi.html?game=<slug>&players=2`를 열면 한 화면에서 두 명으로 해볼 수 있어요 (화면을 클릭한 쪽이 조작돼요). `&late=5`를 붙이면 두 번째 사람이 5초 뒤에 들어와요.
+
 ## 품질 기준 (검수 에이전트가 봐요)
 
 - 처음 10초 안에 뭘 해야 하는지 알 수 있어요.
@@ -93,7 +119,7 @@ games/
 node scripts/check-game.mjs games/<slug>
 ```
 
-실제 브라우저로 사이트와 같은 조건(별도 도메인 + sandbox iframe)에서 켜보고, PC와 휴대폰 크기에서 조작해본 뒤 결과를 알려줘요. 통과하면 `thumbnail.png`도 새로 찍어요.
+실제 브라우저로 사이트와 같은 조건(별도 도메인 + sandbox iframe)에서 켜보고, PC와 휴대폰 크기에서 조작해본 뒤 결과를 알려줘요. 멀티 게임은 두 명(한 명은 3초 늦게 입장)으로도 켜서 서로 메시지를 주고받는지, 크기·횟수 제한을 넘지 않는지 봐요. 통과하면 `thumbnail.png`도 새로 찍어요.
 Playwright가 필요해요. 없으면 `npm i -g playwright && npx playwright install chromium`으로 설치해요.
 
 ## 바로 플레이해보기
@@ -102,4 +128,5 @@ Playwright가 필요해요. 없으면 `npm i -g playwright && npx playwright ins
 
 ```
 https://raw.githack.com/KimTeakwan/minigame/<브랜치>/games/<slug>/index.html
+https://raw.githack.com/KimTeakwan/minigame/<브랜치>/games/_preview/multi.html?game=<slug>&players=2   (멀티 게임)
 ```

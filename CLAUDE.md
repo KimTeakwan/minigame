@@ -22,6 +22,8 @@ AI로 만든 HTML 미니게임을 누구나 올리고 회원들이 플레이하�
 - 알림: 사이트 내 알림만 (이메일 없음)
 - 리더보드: 게임이 `public/sdk.js`의 `GameSDK.submitScore()` 호출 → postMessage → 플레이 페이지 → `submit_score` RPC
 - 공식 게임: 에이전트가 매일 1개 만들어 PR로 올리고, 소유자가 PR에서 검토·병합하면 공식 계정으로 업로드. 공식 계정 게임에는 '공식' 배지
+- 동시 접속자 수: 게임 화면을 보고 있는 사람(30초 heartbeat, 75초 지나면 빠짐). 카드·게임 페이지·헤더에 표시
+- 멀티: 누구나 업로드 때 '멀티 게임'으로 등록 가능, 한 방 2~8명, 빈자리 있는 방부터 채움. 플레이어끼리 자유 채팅 없음 (이모티콘 6개만). 메시지 2KB·1초 10개 제한
 
 ## 공식 게임 (에이전트 제작)
 - 게임 파일: `games/<slug>/` (`index.html` 한 파일 + `game.json` + `thumbnail.png`). 규칙은 `games/README.md`, 뼈대는 `games/_template/`
@@ -30,6 +32,12 @@ AI로 만든 HTML 미니게임을 누구나 올리고 회원들이 플레이하�
 - 업로드: main에 `games/**`가 합쳐지면 `.github/workflows/official-games.yml` → `scripts/publish-official-games.mjs`. 공식 계정 이메일·비밀번호로 로그인해서 일반 회원과 같은 RPC를 써요 (service_role 키 안 씀)
 - 공식 표시: `profiles.is_official` (SQL Editor에서만 바꿈). 카드는 `published_games.uploader_is_official`
 - 업로드 검사 패턴은 `scripts/lib/game-rules.mjs` 한 곳에서 관리해요 (워커·검사·업로드가 같이 씀)
+
+## 접속자 수·멀티플레이
+- DB: `live_players`(한 사람 한 줄), `game_rooms`, RPC `heartbeat` `leave_game` `join_room` `leave_room` `set_room_locked` `set_game_multiplayer` `site_live_count`, 뷰 `game_live_counts` (`supabase/migrations/20261109120000_multiplayer.sql`)
+- 실시간: Supabase Realtime 비공개 채널 `room:<방 id>`. `realtime.messages` RLS로 그 방에 있는 사람만 듣고 보내요
+- 게임 SDK: `public/sdk.js`의 `GameSDK.multi` (게임 템플릿에도 같은 코드). 중계: `lib/multiplayer.ts` (플레이 페이지). 로컬 미리보기·검사용 가짜 중계: `games/_preview/multi.html` — 메시지 규칙을 바꾸면 이 셋을 같이 고쳐요
+- 게임 iframe에 보내는 postMessage는 sandbox(origin "null") 때문에 `"*"`로 보내요. 받는 쪽은 여전히 `event.source` 확인
 
 ## 코드 규칙
 - 화면 문구는 한국어, 해요체.

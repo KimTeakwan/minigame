@@ -22,7 +22,7 @@ export default async function GamePage({ params }: { params: Params }) {
   const { data: game } = await supabase
     .from("games")
     .select(
-      "id,title,description,howto,tags,controls,ai_tool,status,reject_reason,storage_path,leaderboard_enabled,score_order,play_count,like_count,created_at,uploader_id,category_id,category:categories(name),uploader:profiles!games_uploader_id_fkey(nickname,is_official)",
+      "id,title,description,howto,tags,controls,ai_tool,status,reject_reason,storage_path,leaderboard_enabled,score_order,multiplayer,max_players,play_count,like_count,created_at,uploader_id,category_id,category:categories(name),uploader:profiles!games_uploader_id_fkey(nickname,is_official)",
     )
     .eq("id", id)
     .maybeSingle();
@@ -36,7 +36,7 @@ export default async function GamePage({ params }: { params: Params }) {
   const categoryName: string | null = category?.name ?? null;
   const isPublished = game.status === "published" && !!game.storage_path;
 
-  const [likedRes, commentsRes, sameCategoryRes, sameUploaderRes] = await Promise.all([
+  const [likedRes, commentsRes, sameCategoryRes, sameUploaderRes, liveRes, meRes] = await Promise.all([
     user
       ? supabase.from("likes").select("game_id").eq("game_id", id).eq("user_id", user.id).maybeSingle()
       : Promise.resolve({ data: null }),
@@ -59,6 +59,10 @@ export default async function GamePage({ params }: { params: Params }) {
       .neq("id", id)
       .order("created_at", { ascending: false })
       .limit(3),
+    supabase.from("game_live_counts").select("players").eq("game_id", id).maybeSingle(),
+    user
+      ? supabase.from("profiles").select("nickname").eq("id", user.id).maybeSingle()
+      : Promise.resolve({ data: null }),
   ]);
 
   const comments = (commentsRes.data ?? []).map((c: any) => ({
@@ -92,7 +96,7 @@ export default async function GamePage({ params }: { params: Params }) {
 
       <div className="flex flex-wrap items-start gap-6">
         <div className="flex min-w-0 flex-[999_1_600px] flex-col gap-5">
-          {isPublished ? (
+          {isPublished && user ? (
             <GamePlayer
               gameId={game.id}
               title={game.title}
@@ -100,6 +104,10 @@ export default async function GamePage({ params }: { params: Params }) {
               leaderboardEnabled={game.leaderboard_enabled}
               initialLiked={!!likedRes.data}
               initialLikeCount={game.like_count}
+              initialLiveCount={liveRes.data?.players ?? 0}
+              multiplayer={game.multiplayer}
+              maxPlayers={game.max_players}
+              me={{ id: user.id, name: meRes.data?.nickname ?? "플레이어" }}
             />
           ) : (
             <div className="flex aspect-video flex-col items-center justify-center gap-2 rounded-2xl bg-ink p-6 text-center text-[#D6D5CF]">
@@ -149,6 +157,11 @@ export default async function GamePage({ params }: { params: Params }) {
                   #{t}
                 </Link>
               ))}
+              {game.multiplayer && (
+                <span className="inline-flex h-8 items-center rounded-full bg-accent-soft px-3 text-[13px] font-bold text-accent-ink">
+                  멀티 · 최대 {game.max_players}명
+                </span>
+              )}
               <span className="inline-flex h-8 items-center rounded-full bg-chip px-3 text-[13px] text-body">
                 {CONTROL_LABELS[game.controls]} 지원
               </span>

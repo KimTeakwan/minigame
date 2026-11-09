@@ -55,6 +55,11 @@ export default function GameCard({ game, rank, badge }: Props) {
             {aiToolLabel(game.ai_tool)}
           </span>
         )}
+        {game.multiplayer && (
+          <span className="absolute bottom-2.5 right-2.5 rounded-md bg-accent px-2 py-0.5 text-xs font-bold text-white">
+            멀티 {game.max_players}인
+          </span>
+        )}
       </div>
       <div className="flex flex-col gap-1 px-3.5 pb-3.5 pt-3">
         {badge && (
@@ -66,7 +71,13 @@ export default function GameCard({ game, rank, badge }: Props) {
           {game.uploader_is_official && <OfficialBadge />}
           {game.category_name ? <span>· {game.category_name}</span> : null}
         </span>
-        <span className="text-[13px] text-muted">
+        <span className="flex flex-wrap items-center gap-x-1 text-[13px] text-muted">
+          {game.live_count > 0 && (
+            <span className="inline-flex items-center gap-1 font-bold text-[#15803d]">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#22c55e]" aria-hidden="true" />
+              {game.live_count.toLocaleString()}명 플레이 중 ·
+            </span>
+          )}
           좋아요 {game.like_count.toLocaleString()} · {CONTROL_LABELS[game.controls]}
         </span>
       </div>

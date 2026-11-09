@@ -76,6 +76,11 @@ else {
     if (!/GameSDK\.submitScore\s*\(/.test(html)) fail("리더보드 게임인데 GameSDK.submitScore를 부르지 않아요");
     if (!/GameSDK\.newRound\s*\(/.test(html)) warn("GameSDK.newRound를 부르지 않아요 (다시 하기 때 점수를 또 보낼 수 없어요)");
   }
+  if (meta?.multiplayer) {
+    if (!/window\.GameSDK\s*=/.test(html) || !/GAMESDK_MP_JOIN/.test(html)) fail("멀티 게임인데 멀티 SDK 코드가 없어요 (_template의 SDK 블록을 넣어요)");
+    if (!/GameSDK\.multi\.join\s*\(/.test(html)) fail("멀티 게임인데 GameSDK.multi.join을 부르지 않아요");
+    if (!/\.catch\s*\(/.test(html)) warn("join 실패(.catch) 처리가 안 보여요. 사이트 밖이나 연결 실패 때 혼자 모드로 시작해야 해요");
+  }
 }
 
 // ---------------------------------------------------------------- 2. 실제 브라우저 검사
@@ -151,14 +156,14 @@ async function runBrowserChecks() {
   const gamePort = await listen(gameServer, "127.0.0.1");
   const gameOrigin = `http://localhost:${gamePort}`;
 
-  const hostHtml = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<style>html,body{margin:0;height:100%;overflow:hidden;background:#000}iframe{display:block;border:0;width:100%;height:100%}</style></head>
-<body><iframe id="g" src="${gameOrigin}/index.html" sandbox="allow-scripts allow-pointer-lock" allow="autoplay"></iframe>
-<script>window.__msgs=[];var f=document.getElementById("g");addEventListener("message",function(e){if(e.source===f.contentWindow)window.__msgs.push(e.data)});</script>
-</body></html>`;
+  // 바깥 페이지는 games/_preview/multi.html (사이트처럼 sandbox iframe + 가짜 멀티 중계기)이에요.
+  // 혼자 하는 게임은 1명으로, 멀티 게임은 1명(혼자 기다릴 때)과 2명 두 가지로 켜봐요.
+  const hostHtml = readFileSync(new URL("../games/_preview/multi.html", import.meta.url), "utf8");
   const hostServer = createServer((req, res) => res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(hostHtml));
   const hostPort = await listen(hostServer, "127.0.0.1");
   const hostOrigin = `http://127.0.0.1:${hostPort}`;
+  const hostUrl = (players, extra = "") =>
+    `${hostOrigin}/?src=${encodeURIComponent(`${gameOrigin}/index.html`)}&players=${players}&tags=0${extra}`;
 
   const browser = await launchBrowser(chromium);
   const shots = {};
@@ -205,7 +210,7 @@ async function runBrowserChecks() {
     const ctx = await browser.newContext({ viewport: { width: 800, height: 600 } });
     const page = await ctx.newPage();
     const report = watch(page, "PC");
-    await page.goto(`${hostOrigin}/`, { waitUntil: "load" });
+    await page.goto(hostUrl(1), { waitUntil: "load" });
     await page.waitForTimeout(1500);
     const start = await page.screenshot({ path: join(outDir, "pc-start.png") });
     shots.desktopStart = join(outDir, "pc-start.png");
@@ -242,7 +247,7 @@ async function runBrowserChecks() {
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
     const page = await ctx.newPage();
     const report = watch(page, "휴대폰 세로");
-    await page.goto(`${hostOrigin}/`, { waitUntil: "load" });
+    await page.goto(hostUrl(1), { waitUntil: "load" });
     await page.waitForTimeout(1500);
     const start = await page.screenshot({ path: join(outDir, "mobile-start.png") });
     shots.mobileStart = join(outDir, "mobile-start.png");
@@ -272,13 +277,49 @@ async function runBrowserChecks() {
     const ctx = await browser.newContext({ viewport: { width: 844, height: 390 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
     const page = await ctx.newPage();
     const report = watch(page, "휴대폰 가로");
-    await page.goto(`${hostOrigin}/`, { waitUntil: "load" });
+    await page.goto(hostUrl(1), { waitUntil: "load" });
     await page.waitForTimeout(1200);
     await page.touchscreen.tap(422, 195);
     await page.waitForTimeout(1500);
     await page.screenshot({ path: join(outDir, "mobile-landscape.png") });
     shots.mobileLandscape = join(outDir, "mobile-landscape.png");
     await checkLayout(page, "휴대폰 가로");
+    report();
+    await ctx.close();
+  }
+
+  // --- 멀티 2명 (1200×600, 왼쪽·오른쪽 화면). 두 번째 사람은 3초 뒤에 들어와요.
+  if (meta.multiplayer) {
+    const ctx = await browser.newContext({ viewport: { width: 1200, height: 600 } });
+    const page = await ctx.newPage();
+    const report = watch(page, "멀티 2명");
+    await page.goto(hostUrl(2, "&late=3"), { waitUntil: "load" });
+    const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space", "Space", "KeyA", "KeyD", "KeyW"];
+    const t0 = Date.now();
+    let shot = false;
+    while (Date.now() - t0 < 12000) {
+      const x = rand(2) === 0 ? 40 + rand(520) : 640 + rand(520);
+      await page.mouse.click(x, 40 + rand(520));
+      for (let i = 0; i < 3; i++) {
+        const k = keys[rand(keys.length)];
+        await page.keyboard.down(k);
+        await page.waitForTimeout(50 + rand(120));
+        await page.keyboard.up(k);
+      }
+      if (!shot && Date.now() - t0 > 7000) {
+        await page.screenshot({ path: join(outDir, "multi-play.png") });
+        shots.multiPlay = join(outDir, "multi-play.png");
+        shot = true;
+      }
+    }
+    await page.screenshot({ path: join(outDir, "multi-end.png") });
+    shots.multiEnd = join(outDir, "multi-end.png");
+    const mp = await page.evaluate(() => window.__mp);
+    if (mp.joins < 2) fail(`[멀티 2명] 두 사람이 모두 방에 들어오지 않았어요 (들어온 사람 ${mp.joins}명)`);
+    for (const v of [...new Set(mp.violations)].slice(0, 5)) fail(`[멀티 2명] ${v}`);
+    const senders = Object.keys(mp.sends).length;
+    if (senders < 2) warn(`[멀티 2명] 메시지를 보낸 사람이 ${senders}명이에요. 서로 상태를 주고받는지 확인해요`);
+    notes.push(`멀티 2명: 입장 ${mp.joins}명, 보낸 메시지 ${Object.values(mp.sends).reduce((a, b) => a + b, 0)}개, 전달 ${mp.delivered}개, 방 잠금 ${mp.locks}번`);
     report();
     await ctx.close();
   }

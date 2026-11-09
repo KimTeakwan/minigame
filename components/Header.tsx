@@ -10,19 +10,22 @@ export default async function Header() {
   let nickname: string | null = null;
   let isAdmin = false;
   let hasUnread = false;
+  let liveCount = 0;
 
   if (user) {
-    const [{ data: profile }, { count }] = await Promise.all([
+    const [{ data: profile }, { count }, { data: live }] = await Promise.all([
       supabase.from("profiles").select("nickname, role").eq("id", user.id).maybeSingle(),
       supabase
         .from("notifications")
         .select("id", { count: "exact", head: true })
         .eq("user_id", user.id)
         .eq("is_read", false),
+      supabase.rpc("site_live_count"), // 지금 게임 화면을 보고 있는 사람 수 (최근 75초)
     ]);
     nickname = profile?.nickname ?? null;
     isAdmin = profile?.role === "admin";
     hasUnread = (count ?? 0) > 0;
+    liveCount = typeof live === "number" ? live : 0;
   }
 
   return (
@@ -31,6 +34,12 @@ export default async function Header() {
         <Link href="/" className="font-display text-[26px] leading-none text-ink no-underline">
           [사이트 이름]
         </Link>
+        {user && liveCount > 0 && (
+          <span className="inline-flex items-center gap-1.5 text-[13px] font-bold text-[#15803d]">
+            <span className="h-2 w-2 rounded-full bg-[#22c55e]" aria-hidden="true" />
+            지금 {liveCount.toLocaleString()}명 플레이 중
+          </span>
+        )}
 
         {user && (
           <form

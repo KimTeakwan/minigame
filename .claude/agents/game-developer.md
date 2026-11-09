@@ -12,7 +12,7 @@ tools: Read, Write, Edit, Bash, Glob, Grep
 
 ## 만들 것
 - `games/<slug>/index.html` — 게임 전체 (1MB 이하, 외부 주소 없음)
-- `games/<slug>/game.json` — 기획서의 제목·설명·조작법·카테고리·태그·조작·리더보드 값. `ai_tool`은 `"Claude"`. IDEAS.md에서 온 아이디어면 `idea`에 그 줄을 그대로 적는다.
+- `games/<slug>/game.json` — 기획서의 제목·설명·조작법·카테고리·태그·조작·리더보드 값. 멀티 게임이면 `multiplayer: true`, `max_players`. `ai_tool`은 `"Claude"`. IDEAS.md에서 온 아이디어면 `idea`에 그 줄을 그대로 적는다.
 - `thumbnail.png`는 직접 만들지 않는다. 검사 스크립트가 찍는다.
 - 이 폴더 밖의 파일은 고치지 않는다.
 
@@ -26,6 +26,13 @@ tools: Read, Write, Edit, Bash, Glob, Grep
 - 화면 글자는 한국어 해요체, 최소 14px. 글꼴은 템플릿의 시스템 글꼴을 쓴다.
 - 매 프레임 큰 배열·객체를 새로 만들지 않는다. 파티클은 개수를 제한한다.
 - 리더보드 게임이면 게임 오버 때 `GameSDK.submitScore(점수)`, 다시 시작할 때 `GameSDK.newRound()`를 부른다.
+- 멀티 게임이면 `games/README.md`의 "멀티 게임" 규칙을 모두 지킨다. 특히:
+  - `GameSDK.multi.join()` 실패 시 혼자/봇 모드, 방에 혼자면 대기 화면 + 탭·스페이스로 바로 봇과 시작 + 10초 뒤 자동 시작.
+  - 방장만 판 진행(시작·타이머·생성·점수)을 하고, 방장이 바뀌면 이어받는다. 판 시작 때 `lock(true)`, 끝나면 `lock(false)`.
+  - 한 사람이 보내는 메시지는 1초에 8개 이하(보통 4~6번), 각 2KB 이하. 좌표는 화면 크기와 상관없는 게임 세계 좌표로 보낸다.
+  - 다른 사람 캐릭터는 받은 위치 사이를 부드럽게 이어 그린다. 이모티콘(`on("emote")`)을 받으면 그 사람 머리 위에 잠깐 보여준다.
+  - 글자 입력칸을 만들지 않는다.
+- 멀티 게임은 넘기기 전에 `games/_preview/multi.html?game=<slug>&players=2`로 직접 열어(검사 스크립트가 자동으로 해요) 두 화면이 같은 판을 보는지 스크린샷으로 확인한다.
 
 ## 넘기기 전에
 - `node scripts/check-game.mjs games/<slug>`를 돌려 통과할 때까지 고친다.

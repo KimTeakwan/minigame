@@ -154,6 +154,16 @@ for (const slug of slugs) {
   try {
     await r2.send(new PutObjectCommand({ Bucket: BUCKET, Key: row.upload_key, Body: html, ContentType: "text/html; charset=utf-8" }));
 
+    // 멀티 게임이면 방 인원 설정 (혼자 하는 게임은 기본값 그대로)
+    if (meta.multiplayer) {
+      const { error: mpError } = await supabase.rpc("set_game_multiplayer", {
+        p_game_id: row.game_id,
+        p_multiplayer: true,
+        p_max_players: meta.max_players,
+      });
+      if (mpError) throw mpError;
+    }
+
     let thumbnailUrl = null;
     const thumbPath = join(dir, "thumbnail.png");
     if (existsSync(thumbPath)) {

@@ -14,6 +14,8 @@ type Body = {
   aiTool: string | null;
   leaderboard: boolean;
   scoreOrder: "asc" | "desc";
+  multiplayer?: boolean;
+  maxPlayers?: number;
   file: { name: string; size: number; type: string };
   thumbnail: { name: string; size: number; type: string } | null;
 };
@@ -34,6 +36,9 @@ export async function POST(request: Request) {
   if (!body.file || !/\.(zip|html?)$/i.test(body.file.name)) return bad("zip 또는 HTML 파일만 올릴 수 있어요");
   if (body.file.size <= 0 || body.file.size > MAX_GAME_FILE_BYTES) return bad("파일은 50MB까지 올릴 수 있어요");
   if (!["application/zip", "text/html"].includes(body.file.type)) return bad("파일 형식이 올바르지 않아요");
+  const multiplayer = body.multiplayer === true;
+  const maxPlayers = multiplayer ? Math.trunc(Number(body.maxPlayers)) : 1;
+  if (multiplayer && !(maxPlayers >= 2 && maxPlayers <= 8)) return bad("멀티 게임은 한 방에 2~8명이에요");
   if (body.thumbnail) {
     if (!/^image\/(png|jpeg|webp)$/.test(body.thumbnail.type)) return bad("썸네일은 PNG, JPG, WEBP만 돼요");
     if (body.thumbnail.size > MAX_THUMBNAIL_BYTES) return bad("썸네일은 5MB까지예요");
@@ -56,6 +61,16 @@ export async function POST(request: Request) {
   if (error) return bad(error.message);
 
   const row = (Array.isArray(data) ? data[0] : data) as { game_id: string; version_number: number; upload_key: string };
+
+  // 멀티 설정 (새 게임이 혼자 하는 게임이면 기본값 그대로라 부를 필요가 없어요)
+  if (multiplayer || body.gameId) {
+    const { error: mpError } = await supabase.rpc("set_game_multiplayer", {
+      p_game_id: row.game_id,
+      p_multiplayer: multiplayer,
+      p_max_players: maxPlayers,
+    });
+    if (mpError) return bad(mpError.message);
+  }
 
   const uploadUrl = await createUploadUrl(row.upload_key, body.file.type, body.file.size);
 
