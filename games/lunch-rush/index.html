@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>반찬 쟁탈전</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #fbe9cf; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #mute {
+    position: fixed; top: 10px; right: 10px; width: 44px; height: 44px; border: 0; border-radius: 12px;
+    background: rgba(90, 50, 20, .14); color: #5a3214; font-size: 20px; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="mute" aria-label="소리 끄기">🔊</button>
+<script>
+/* ===== 게임 SDK: 리더보드 + 멀티 (public/sdk.js와 같은 코드) ===== */
+(function () {
+  var sent = false;
+  var standalone = window.parent === window; // 파일을 직접 열었을 때
+  var listeners = { message: [], players: [], emote: [], error: [] };
+  var room = { joined: false, roomId: null, me: null, players: [], hostId: null, maxPlayers: 0 };
+  var waiting = [];
+
+  function post(msg) {
+    if (!standalone) window.parent.postMessage(msg, "*");
+  }
+  function emit(name, a, b) {
+    var list = listeners[name] || [];
+    for (var i = 0; i < list.length; i++) {
+      try { list[i](a, b); } catch (e) { setTimeout(function () { throw e; }); }
+    }
+  }
+  function settle(ok, value) {
+    var list = waiting;
+    waiting = [];
+    for (var i = 0; i < list.length; i++) {
+      clearTimeout(list[i].timer);
+      ok ? list[i].resolve(value) : list[i].reject(new Error(value));
+    }
+  }
+
+  window.addEventListener("message", function (event) {
+    if (standalone || event.source !== window.parent) return; // 바깥 플레이 페이지에서 온 것만
+    var m = event.data;
+    if (!m || typeof m !== "object") return;
+    if (m.type === "GAMESDK_MP_JOINED") {
+      room = { joined: true, roomId: m.roomId, me: m.me, players: m.players || [], hostId: m.hostId, maxPlayers: m.maxPlayers };
+      settle(true, { roomId: room.roomId, me: room.me, players: room.players, hostId: room.hostId, maxPlayers: room.maxPlayers });
+      emit("players", room.players, room.hostId);
+    } else if (m.type === "GAMESDK_MP_PLAYERS") {
+      room.players = m.players || [];
+      room.hostId = m.hostId;
+      emit("players", room.players, room.hostId);
+    } else if (m.type === "GAMESDK_MP_MESSAGE") {
+      emit("message", m.data, m.from);
+    } else if (m.type === "GAMESDK_MP_EMOTE") {
+      emit("emote", m.key, m.from);
+    } else if (m.type === "GAMESDK_MP_ERROR") {
+      if (!room.joined) settle(false, m.message);
+      emit("error", m.message);
+    }
+  });
+
+  window.GameSDK = {
+    submitScore: function (score) {
+      if (sent) return; // 한 판에 한 번만
+      if (typeof score !== "number" || !isFinite(score)) return;
+      sent = true;
+      post({ type: "GAMESDK_SCORE", score: score });
+    },
+    // 새 판을 시작할 때 부르면 다시 점수를 보낼 수 있어요.
+    newRound: function () {
+      sent = false;
+      post({ type: "GAMESDK_NEW_ROUND" });
+    },
+    multi: {
+      join: function () {
+        return new Promise(function (resolve, reject) {
+          if (standalone) return reject(new Error("사이트 밖에서는 멀티를 쓸 수 없어요"));
+          var w = { resolve: resolve, reject: reject, timer: 0 };
+          w.timer = setTimeout(function () {
+            waiting = waiting.filter(function (x) { return x !== w; });
+            reject(new Error("방에 들어가지 못했어요 (응답 없음)"));
+          }, 8000);
+          waiting.push(w);
+          post({ type: "GAMESDK_MP_JOIN" });
+        });
+      },
+      send: function (data) { if (room.joined) post({ type: "GAMESDK_MP_SEND", data: data }); },
+      emote: function (key) { if (room.joined) post({ type: "GAMESDK_MP_EMOTE", key: key }); },
+      lock: function (locked) { if (room.joined) post({ type: "GAMESDK_MP_LOCK", locked: locked !== false }); },
+      leave: function () {
+        if (!room.joined) return;
+        room = { joined: false, roomId: null, me: null, players: [], hostId: null, maxPlayers: 0 };
+        post({ type: "GAMESDK_MP_LEAVE" });
+      },
+      on: function (name, fn) { if (listeners[name] && typeof fn === "function") listeners[name].push(fn); },
+      me: function () { return room.me; },
+      players: function () { return room.players.slice(); },
+      hostId: function () { return room.hostId; },
+      isHost: function () { return !!room.me && room.me.id === room.hostId; },
+    },
+  };
+})();
+
+/* =====================================================================
+   반찬 쟁탈전 — 돗자리 위에 떨어진 반찬을 먼저 줍는 사람이 이겨요 (2~4명, 60초)
+   멀티 구조
+   - 방장(먼저 들어온 사람)이 판 진행·반찬 생성·점수·컴퓨터 플레이어를 맡고 1초에 4번 상태("s")를 보내요.
+   - 나머지는 자기 위치와 주운 반찬 번호("p")를 1초에 4번(가만히 있으면 1번) 보내요.
+   - 혼자면 컴퓨터 2명과 해요. 방에 혼자 있거나 멀티 연결이 안 되면 내가 방장이에요.
+   ===================================================================== */
+const WORLD = 1000;            // 게임 세계는 1000×1000 정사각형 (모든 화면에서 같은 좌표)
+const ROUND_MS = 60000, COUNT_MS = 3000, RESULT_MS = 6000;
+const PLAYER_R = 34, ITEM_R = 26, SPEED = 330, BOT_SPEED = 270;
+const SEND_MS = 250, IDLE_SEND_MS = 1000;
+const MIN_PARTICIPANTS = 3;    // 사람이 모자라면 컴퓨터로 채워요
+const COLORS = ["#e2553f", "#2f7de1", "#2fa84f", "#9b51e0"];
+const BOT_NAMES = ["컴퓨터 하나", "컴퓨터 둘", "컴퓨터 셋"];
+const EMOTE_ICONS = { hi: "👋", gg: "🤝", again: "🔁", wow: "😮", oops: "😅", thanks: "🙏" };
+const DISHES = ["egg", "sausage", "kimbap", "tomato", "riceball"];
+
+/* ===== 화면 ===== */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, S = 1, OX = 0, OY = 0, HUD_Y = 0; // S: 세계 1칸이 화면에서 몇 px인지
+let TOP = 92;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  // 위쪽 HUD 두 줄(내 점수·시간 / 점수판) + 돗자리. HUD는 돗자리 바로 위에 붙여요.
+  TOP = W < 520 ? 104 : 88;
+  const bottom = 10;
+  const side = Math.max(120, Math.min(W - 16, H - TOP - bottom));
+  S = side / WORLD;
+  OX = (W - side) / 2;
+  OY = TOP + Math.max(0, (H - TOP - bottom - side) / 2);
+  HUD_Y = OY - TOP;
+}
+window.addEventListener("resize", resize);
+resize();
+const sx = (x) => OX + x * S, sy = (y) => OY + y * S;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+/* ===== 소리 ===== */
+let audio = null, muted = false;
+function tone(freq, dur = 0.08, type = "triangle", vol = 0.07, when = 0) {
+  if (!audio || muted) return;
+  const t = audio.currentTime + when, o = audio.createOscillator(), g = audio.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(audio.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function unlockAudio() {
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audio = null; } }
+  if (audio && audio.state === "suspended") audio.resume();
+}
+const sfx = {
+  grab: (gold) => gold ? [880, 1175, 1568].forEach((f, i) => tone(f, 0.1, "triangle", 0.07, i * 0.05)) : tone(660 + Math.random() * 120, 0.07),
+  tick: () => tone(520, 0.08, "square", 0.05),
+  go: () => tone(880, 0.2, "square", 0.06),
+  end: () => [523, 392, 330].forEach((f, i) => tone(f, 0.18, "triangle", 0.07, i * 0.14)),
+  win: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.14, "triangle", 0.07, i * 0.09)),
+  join: () => tone(740, 0.08, "sine", 0.05),
+};
+const muteBtn = document.getElementById("mute");
+muteBtn.addEventListener("pointerdown", (e) => {
+  e.stopPropagation(); muted = !muted;
+  muteBtn.textContent = muted ? "🔇" : "🔊";
+  muteBtn.setAttribute("aria-label", muted ? "소리 켜기" : "소리 끄기");
+});
+
+/* ===== 멀티 연결 ===== */
+const MP = GameSDK.multi;
+let online = false;            // 멀티 방에 들어갔는지 (아니면 혼자 + 컴퓨터)
+let myId = "me", myName = "나";
+let humans = [{ id: "me", name: "나" }]; // 방에 있는 사람 (SDK가 준 닉네임만 써요)
+let hostId = "me";
+const isHost = () => hostId === myId;
+
+GameSDK.multi.join().then((room) => {
+  online = true;
+  const oldId = myId;
+  myId = room.me.id; myName = room.me.name;
+  // 연결되기 전에 혼자 판을 시작했다면 내 기록을 새 id로 옮겨요
+  for (const p of state.roster) if (p.id === oldId) p.id = myId;
+  if (oldId in state.scores) { state.scores[myId] = state.scores[oldId]; delete state.scores[oldId]; }
+  applyPlayers(room.players, room.hostId);
+}).catch(() => { online = false; /* 혼자 모드 */ });
+
+MP.on("players", (players, host) => applyPlayers(players, host));
+MP.on("message", (data, from) => onNet(data, from));
+MP.on("emote", (key, from) => { if (EMOTE_ICONS[key]) bubbles[from] = { icon: EMOTE_ICONS[key], until: now() + 2500 }; });
+
+function applyPlayers(players, host) {
+  const before = humans.map((h) => h.id);
+  humans = players.map((p) => ({ id: p.id, name: String(p.name || "플레이어").slice(0, 12) }));
+  const wasHost = isHost();
+  hostId = host || myId;
+  if (humans.some((h) => !before.includes(h.id)) && before.length) sfx.join();
+  if (!wasHost && isHost()) lastStateSent = 0; // 방장을 이어받았어요
+  // 판 도중에 나간 사람은 컴퓨터가 이어받아요
+  if (isHost() && state.phase !== "lobby") {
+    for (const p of state.roster) if (!p.bot && !humans.some((h) => h.id === p.id)) p.bot = true;
+  }
+  for (const id of Object.keys(remotes)) if (!humans.some((h) => h.id === id)) delete remotes[id];
+}
+function send(data) { if (online) MP.send(data); }
+
+/* ===== 게임 상태 (방장이 정하고 다른 사람은 받아서 그대로 그려요) ===== */
+const state = {
+  phase: "lobby",    // lobby | count | play | result
+  endsAt: 0,         // 이 단계가 끝나는 시각 (내 시계 기준)
+  roster: [],        // 이번 판 참가자 [{id, bot, x, y, tx, ty}]
+  items: [],         // [{id, x, y, k}]  k: 0~4 반찬, 9 황금 계란말이
+  scores: {},        // id → 점수
+  round: 0,
+};
+let lobbySince = 0;
+let nextItemId = 1;
+const remotes = {};  // 다른 사람 위치 {x, y, tx, ty, seen}
+const hiddenItems = {}; // 내가 주웠다고 보낸 반찬 (방장 확인 전까지 숨겨요)
+const bubbles = {};  // 이모티콘 말풍선
+let particles = [], popups = [];
+let submitted = true;
+const now = () => performance.now();
+
+const me = { x: 500, y: 500, tx: null, ty: null };
+let pendingGrabs = [];
+let lastSent = 0, lastStateSent = 0, lastSentX = -1, lastSentY = -1;
+
+function participantName(id) {
+  const r = state.roster.find((p) => p.id === id);
+  if (r && r.bot) return /^bot\d$/.test(id) ? BOT_NAMES[+id.slice(3) - 1] || "컴퓨터" : "대신하는 컴퓨터"; // 나간 사람 자리는 컴퓨터가 이어받아요
+  const h = humans.find((x) => x.id === id);
+  return id === myId ? myName : h ? h.name : "플레이어";
+}
+function colorOf(id) {
+  const i = state.roster.findIndex((p) => p.id === id);
+  return COLORS[(i >= 0 ? i : humans.findIndex((h) => h.id === id) + 1) % COLORS.length];
+}
+
+/* ----- 방장만: 판 진행 ----- */
+function startCountdown() {
+  const ids = humans.slice(0, 4).map((h) => h.id);
+  const roster = ids.map((id) => ({ id, bot: false }));
+  let b = 0;
+  while (roster.length < Math.max(MIN_PARTICIPANTS, ids.length)) roster.push({ id: "bot" + (++b), bot: true });
+  const corners = [[150, 150], [850, 850], [850, 150], [150, 850]];
+  roster.forEach((p, i) => { p.x = corners[i][0]; p.y = corners[i][1]; p.tx = p.x; p.ty = p.y; p.think = 0; });
+  const mine = roster.find((p) => p.id === myId);
+  if (mine) { me.x = mine.x; me.y = mine.y; me.tx = null; }
+  state.roster = roster;
+  state.scores = {};
+  roster.forEach((p) => (state.scores[p.id] = 0));
+  state.items = [];
+  for (let i = 0; i < 8; i++) spawnItem(false);
+  state.phase = "count";
+  state.endsAt = now() + COUNT_MS;
+  state.round++;
+  MP.lock(true);
+  lastStateSent = 0;
+}
+function spawnItem(gold) {
+  for (let tries = 0; tries < 20; tries++) {
+    const x = rnd(80, 920), y = rnd(80, 920);
+    if (state.roster.some((p) => { const q = positionOf(p.id); return q && Math.hypot(q.x - x, q.y - y) < 140; })) continue;
+    if (state.items.some((it) => Math.hypot(it.x - x, it.y - y) < 90)) continue;
+    state.items.push({ id: nextItemId++, x, y, k: gold ? 9 : Math.floor(Math.random() * DISHES.length) });
+    return;
+  }
+}
+function giveItem(playerId, itemId) {
+  if (state.phase !== "play") return;
+  const idx = state.items.findIndex((it) => it.id === itemId);
+  if (idx < 0 || !(playerId in state.scores)) return;
+  const it = state.items[idx];
+  state.items.splice(idx, 1);
+  state.scores[playerId] += it.k === 9 ? 30 : 10;
+  effectGrab(it, playerId);
+  lastStateSent = 0; // 바로 알려요
+}
+let goldTimer = 0, spawnTimer = 0;
+function hostUpdate(dt) {
+  const t = now();
+  if (state.phase === "lobby") {
+    const wait = humans.length >= 2 ? 5000 : 10000;
+    if (!lobbySince) lobbySince = t;
+    if (t - lobbySince > wait) startCountdown();
+  } else if (state.phase === "count" && t >= state.endsAt) {
+    state.phase = "play"; state.endsAt = t + ROUND_MS; goldTimer = 8; spawnTimer = 0;
+  } else if (state.phase === "play") {
+    if (t >= state.endsAt) {
+      state.phase = "result"; state.endsAt = t + RESULT_MS; MP.lock(false);
+    } else {
+      spawnTimer -= dt; goldTimer -= dt;
+      if (spawnTimer <= 0 && state.items.length < 9) { spawnItem(false); spawnTimer = 0.6; }
+      if (goldTimer <= 0) { spawnItem(true); goldTimer = rnd(8, 12); }
+      updateBots(dt);
+      // 컴퓨터가 반찬 줍기
+      for (const p of state.roster) if (p.bot) {
+        const it = state.items.find((it) => Math.hypot(it.x - p.x, it.y - p.y) < PLAYER_R + ITEM_R);
+        if (it) giveItem(p.id, it.id);
+      }
+    }
+  } else if (state.phase === "result" && t >= state.endsAt) {
+    state.phase = "lobby"; lobbySince = t; state.items = [];
+  }
+}
+function updateBots(dt) {
+  for (const p of state.roster) {
+    if (!p.bot) continue;
+    p.think -= dt;
+    if (p.think <= 0 || !state.items.some((it) => it.x === p.tx && it.y === p.ty)) {
+      const sorted = state.items.slice().sort((a, b) => (Math.hypot(a.x - p.x, a.y - p.y) - (a.k === 9 ? 150 : 0)) - (Math.hypot(b.x - p.x, b.y - p.y) - (b.k === 9 ? 150 : 0)));
+      const pick = sorted[Math.random() < 0.7 ? 0 : Math.min(1, sorted.length - 1)];
+      if (pick) { p.tx = pick.x; p.ty = pick.y; }
+      p.think = rnd(0.4, 0.9);
+    }
+    const dx = p.tx - p.x, dy = p.ty - p.y, d = Math.hypot(dx, dy);
+    if (d > 2) { const step = Math.min(d, BOT_SPEED * dt); p.x += dx / d * step; p.y += dy / d * step; }
+  }
+}
+function sendState() {
+  const t = now();
+  const rosterOut = state.roster.map((p) => [p.id, p.bot ? 1 : 0]);
+  send({
+    t: "s",
+    ph: state.phase,
+    tl: Math.max(0, Math.round(state.endsAt - t)),
+    n: state.round,
+    r: rosterOut,
+    it: state.items.map((it) => [it.id, Math.round(it.x), Math.round(it.y), it.k]),
+    sc: state.roster.map((p) => state.scores[p.id] || 0),
+    b: state.roster.filter((p) => p.bot).map((p) => [Math.round(p.x), Math.round(p.y)]),
+    h: [Math.round(me.x), Math.round(me.y)],
+  });
+}
+
+/* ----- 받은 메시지 ----- */
+function onNet(data, from) {
+  if (!data || typeof data !== "object") return;
+  if (data.t === "p") {
+    const r = remotes[from] || (remotes[from] = { x: data.x, y: data.y });
+    r.tx = clamp(+data.x || 0, 0, WORLD); r.ty = clamp(+data.y || 0, 0, WORLD); r.seen = now();
+    if (isHost() && Array.isArray(data.g)) for (const id of data.g.slice(0, 5)) giveItem(from, id);
+    if (isHost() && data.go && state.phase === "lobby") startCountdown();
+  } else if (data.t === "s" && from === hostId && !isHost()) {
+    applyState(data);
+  }
+}
+function applyState(d) {
+  const t = now();
+  const prevPhase = state.phase;
+  const prevScores = state.scores;
+  state.phase = ["lobby", "count", "play", "result"].includes(d.ph) ? d.ph : "lobby";
+  state.endsAt = t + clamp(+d.tl || 0, 0, ROUND_MS + 1000);
+  if (Array.isArray(d.r)) {
+    const old = {};
+    for (const p of state.roster) old[p.id] = p;
+    state.roster = d.r.slice(0, 4).map((e) => {
+      const id = String(e[0]).slice(0, 64), o = old[id];
+      return { id, bot: !!e[1], x: o ? o.x : 500, y: o ? o.y : 500, tx: o ? o.tx : 500, ty: o ? o.ty : 500 };
+    });
+  }
+  if (Array.isArray(d.it)) {
+    state.items = d.it.slice(0, 20).map((e) => ({ id: +e[0], x: +e[1], y: +e[2], k: +e[3] === 9 ? 9 : clamp(+e[3] | 0, 0, 4) }));
+    for (const id of Object.keys(hiddenItems)) if (!state.items.some((it) => it.id === +id) || t - hiddenItems[id] > 800) delete hiddenItems[id];
+  }
+  if (Array.isArray(d.sc)) {
+    const scores = {};
+    state.roster.forEach((p, i) => (scores[p.id] = +d.sc[i] || 0));
+    // 남이 주운 반찬도 효과를 보여줘요
+    for (const p of state.roster) {
+      if (p.id !== myId && (scores[p.id] || 0) > (prevScores[p.id] || 0) && state.phase === "play") {
+        const pos = p.bot ? p : p.id === hostId ? { x: remoteHost.tx, y: remoteHost.ty } : remotes[p.id];
+        if (pos) popup(pos.x, pos.y - 40, `+${scores[p.id] - (prevScores[p.id] || 0)}`, colorOf(p.id));
+      }
+    }
+    state.scores = scores; // 내 점수 효과는 주울 때 바로 보여줬어요
+  }
+  if (Array.isArray(d.b)) {
+    const bots = state.roster.filter((p) => p.bot);
+    bots.forEach((p, i) => { if (d.b[i]) { p.tx = clamp(+d.b[i][0], 0, WORLD); p.ty = clamp(+d.b[i][1], 0, WORLD); } });
+  }
+  if (Array.isArray(d.h)) {
+    remoteHost.tx = clamp(+d.h[0], 0, WORLD); remoteHost.ty = clamp(+d.h[1], 0, WORLD);
+    remotes[hostId] = remoteHost;
+  }
+  if (prevPhase !== state.phase) onPhaseChange();
+  // 새 판에서 내 시작 위치
+  if (prevPhase !== "count" && state.phase === "count") {
+    const i = state.roster.findIndex((p) => p.id === myId);
+    const corners = [[150, 150], [850, 850], [850, 150], [150, 850]];
+    if (i >= 0) { me.x = corners[i][0]; me.y = corners[i][1]; me.tx = null; }
+  }
+}
+const remoteHost = { x: 500, y: 500, tx: 500, ty: 500 };
+
+let lastPhase = "lobby";
+function onPhaseChange() {
+  if (state.phase === "count") { sfx.tick(); GameSDK.newRound(); submitted = false; }
+  if (state.phase === "play") sfx.go();
+  if (state.phase === "result") {
+    const ranks = ranking();
+    if (ranks[0] && ranks[0].id === myId) sfx.win(); else sfx.end();
+    if (!submitted && state.roster.some((p) => p.id === myId)) { GameSDK.submitScore(state.scores[myId] || 0); submitted = true; }
+  }
+  if (state.phase === "lobby") lobbySince = now();
+  lastPhase = state.phase;
+}
+
+/* ===== 입력 ===== */
+const keys = new Set();
+window.addEventListener("keydown", (e) => {
+  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " "].includes(e.key)) e.preventDefault();
+  unlockAudio();
+  if ((e.key === " " || e.key === "Enter") && !keys.has(e.key)) requestStart();
+  keys.add(e.key.toLowerCase());
+  if (e.key.startsWith("Arrow") || "wasd".includes(e.key.toLowerCase())) me.tx = null;
+});
+window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+let pointerDown = false;
+function toWorld(e) { return { x: clamp((e.clientX - OX) / S, 0, WORLD), y: clamp((e.clientY - OY) / S, 0, WORLD) }; }
+canvas.addEventListener("pointerdown", (e) => {
+  unlockAudio(); pointerDown = true;
+  if (state.phase === "lobby" || state.phase === "result") { requestStart(); return; }
+  const w = toWorld(e); me.tx = w.x; me.ty = w.y;
+});
+canvas.addEventListener("pointermove", (e) => { if (pointerDown && state.phase !== "lobby") { const w = toWorld(e); me.tx = w.x; me.ty = w.y; } });
+window.addEventListener("pointerup", () => { pointerDown = false; });
+window.addEventListener("pointercancel", () => { pointerDown = false; });
+
+function requestStart() {
+  if (state.phase !== "lobby") return;
+  if (isHost()) startCountdown();
+  else send({ t: "p", x: Math.round(me.x), y: Math.round(me.y), go: 1 });
+}
+
+/* ===== 업데이트 ===== */
+function update(dt) {
+  const t = now();
+  if (isHost()) hostUpdate(dt);
+  if (state.phase !== lastPhase) onPhaseChange();
+
+  // 내 캐릭터 움직이기 (판 중에만)
+  const playing = state.phase === "play";
+  let vx = 0, vy = 0;
+  if (keys.has("arrowleft") || keys.has("a")) vx -= 1;
+  if (keys.has("arrowright") || keys.has("d")) vx += 1;
+  if (keys.has("arrowup") || keys.has("w")) vy -= 1;
+  if (keys.has("arrowdown") || keys.has("s")) vy += 1;
+  if (playing) {
+    if (vx || vy) { const d = Math.hypot(vx, vy); me.x += vx / d * SPEED * dt; me.y += vy / d * SPEED * dt; }
+    else if (me.tx !== null) {
+      const dx = me.tx - me.x, dy = me.ty - me.y, d = Math.hypot(dx, dy);
+      if (d > 3) { const step = Math.min(d, SPEED * dt); me.x += dx / d * step; me.y += dy / d * step; }
+    }
+    me.x = clamp(me.x, PLAYER_R, WORLD - PLAYER_R); me.y = clamp(me.y, PLAYER_R, WORLD - PLAYER_R);
+    // 반찬 줍기
+    if (state.roster.some((p) => p.id === myId)) {
+      for (const it of state.items) {
+        if (hiddenItems[it.id] || Math.hypot(it.x - me.x, it.y - me.y) > PLAYER_R + ITEM_R) continue;
+        if (isHost()) { giveItem(myId, it.id); sfx.grab(it.k === 9); break; }
+        hiddenItems[it.id] = t; pendingGrabs.push(it.id); effectGrab(it, myId); sfx.grab(it.k === 9);
+      }
+    }
+  }
+
+  // 보내기: 방장은 상태, 나머지는 내 위치
+  if (isHost()) {
+    if (t - lastStateSent >= SEND_MS && humans.length > 1) { sendState(); lastStateSent = t; }
+  } else {
+    const moved = Math.abs(me.x - lastSentX) > 2 || Math.abs(me.y - lastSentY) > 2;
+    const gap = t - lastSent;
+    if ((pendingGrabs.length && gap >= SEND_MS) || (moved && gap >= SEND_MS) || gap >= IDLE_SEND_MS) {
+      const msg = { t: "p", x: Math.round(me.x), y: Math.round(me.y) };
+      if (pendingGrabs.length) msg.g = pendingGrabs.splice(0, 5);
+      send(msg); lastSent = t; lastSentX = me.x; lastSentY = me.y;
+    }
+  }
+
+  // 다른 사람·컴퓨터는 받은 위치 쪽으로 부드럽게
+  const k = Math.min(1, dt * 9);
+  for (const id of Object.keys(remotes)) { const r = remotes[id]; if (r.tx !== undefined) { r.x += (r.tx - r.x) * k; r.y += (r.ty - r.y) * k; } }
+  if (!isHost()) for (const p of state.roster) if (p.bot) { p.x += (p.tx - p.x) * k; p.y += (p.ty - p.y) * k; }
+
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 500 * dt; p.life -= dt; }
+  particles = particles.filter((p) => p.life > 0);
+  for (const p of popups) { p.y -= 60 * dt; p.life -= dt; }
+  popups = popups.filter((p) => p.life > 0);
+}
+
+function effectGrab(it, playerId) {
+  const color = it.k === 9 ? "#ffcf3a" : ["#f6c945", "#e2553f", "#2d2d2d", "#e8323a", "#ffffff"][it.k];
+  for (let i = 0; i < 12 && particles.length < 160; i++) {
+    const a = rnd(0, Math.PI * 2), s = rnd(80, 260);
+    particles.push({ x: it.x, y: it.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 100, life: rnd(0.3, 0.6), color });
+  }
+  if (isHost() && playerId !== myId) {
+    const pos = positionOf(playerId);
+    if (pos) popup(pos.x, pos.y - 40, `+${it.k === 9 ? 30 : 10}`, colorOf(playerId));
+  } else if (playerId === myId) {
+    popup(me.x, me.y - 50, `+${it.k === 9 ? 30 : 10}`, "#c2410c", 22);
+  }
+}
+function popup(x, y, text, color, size = 18) { if (popups.length < 20) popups.push({ x, y, text, color, size, life: 0.8 }); }
+
+function positionOf(id) {
+  if (id === myId) return me;
+  const r = state.roster.find((p) => p.id === id);
+  if (r && r.bot) return r;
+  return remotes[id];
+}
+function ranking() {
+  return state.roster.map((p) => ({ id: p.id, score: state.scores[p.id] || 0 })).sort((a, b) => b.score - a.score);
+}
+
+/* ===== 그리기 ===== */
+function draw() {
+  const t = now();
+  ctx.fillStyle = "#fbe9cf"; ctx.fillRect(0, 0, W, H);
+  drawMat();
+  for (const it of state.items) if (!hiddenItems[it.id]) drawItem(it, t);
+
+  // 캐릭터 (참가자 + 구경하는 사람)
+  const drawn = new Set();
+  for (const p of state.roster) {
+    const pos = positionOf(p.id);
+    if (!pos) continue;
+    drawPlayer(pos.x, pos.y, colorOf(p.id), participantName(p.id), p.id === myId, false, p.id);
+    drawn.add(p.id);
+  }
+  for (const h of humans) if (!drawn.has(h.id)) {
+    const pos = h.id === myId ? me : remotes[h.id];
+    if (pos && pos.x !== undefined) drawPlayer(pos.x, pos.y, "#9a9a9a", h.name, h.id === myId, true, h.id);
+  }
+  for (const p of particles) { ctx.globalAlpha = Math.max(0, p.life * 2); circle(sx(p.x), sy(p.y), Math.max(2, 5 * S), p.color); }
+  ctx.globalAlpha = 1;
+  for (const p of popups) { ctx.globalAlpha = Math.min(1, p.life * 2); text(p.text, sx(p.x), sy(p.y), p.size, "center", "900", p.color); }
+  ctx.globalAlpha = 1;
+  drawHud(t);
+  if (state.phase === "lobby") drawLobby(t);
+  if (state.phase === "count") drawCount(t);
+  if (state.phase === "result") drawResult();
+}
+
+function drawMat() {
+  const x0 = sx(0), y0 = sy(0), size = WORLD * S, cell = size / 10;
+  ctx.fillStyle = "#fff"; roundRect(x0, y0, size, size, 14 * S + 4); ctx.fill();
+  ctx.save(); roundRect(x0, y0, size, size, 14 * S + 4); ctx.clip();
+  ctx.fillStyle = "rgba(226,85,63,.28)";
+  for (let i = 0; i < 10; i += 2) ctx.fillRect(x0 + i * cell, y0, cell, size);
+  ctx.fillStyle = "rgba(226,85,63,.18)";
+  for (let i = 0; i < 10; i += 2) ctx.fillRect(x0, y0 + i * cell, size, cell);
+  ctx.restore();
+  ctx.strokeStyle = "#e2553f"; ctx.lineWidth = 3; roundRect(x0, y0, size, size, 14 * S + 4); ctx.stroke();
+}
+
+function drawItem(it, t) {
+  const x = sx(it.x), y = sy(it.y), r = ITEM_R * S;
+  const bob = Math.sin(t / 300 + it.id) * 2;
+  ctx.save(); ctx.translate(x, y + bob);
+  ctx.fillStyle = "rgba(0,0,0,.12)"; ctx.beginPath(); ctx.ellipse(0, r * 0.95 - bob, r * 0.9, r * 0.28, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.lineWidth = Math.max(1.5, r * 0.09); ctx.strokeStyle = "rgba(60,30,10,.5)";
+  if (it.k === 9) {
+    ctx.shadowColor = "#ffd34d"; ctx.shadowBlur = 14;
+    roundRect(-r, -r * 0.6, r * 2, r * 1.2, r * 0.3); ctx.fillStyle = "#ffc928"; ctx.fill(); ctx.shadowBlur = 0; ctx.stroke();
+    ctx.fillStyle = "#fff8c8"; const s = r * 0.25, a = t / 300;
+    ctx.beginPath(); ctx.moveTo(Math.cos(a) * r * 1.3, Math.sin(a) * r - s); ctx.lineTo(Math.cos(a) * r * 1.3 + s * 0.4, Math.sin(a) * r); ctx.lineTo(Math.cos(a) * r * 1.3, Math.sin(a) * r + s); ctx.lineTo(Math.cos(a) * r * 1.3 - s * 0.4, Math.sin(a) * r); ctx.fill();
+  } else {
+    switch (DISHES[it.k]) {
+      case "egg": roundRect(-r, -r * 0.6, r * 2, r * 1.2, r * 0.3); ctx.fillStyle = "#f6c945"; ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = "#e0a91c"; for (let i = -1; i <= 1; i++) { ctx.beginPath(); ctx.moveTo(i * r * 0.55, -r * 0.45); ctx.lineTo(i * r * 0.55, r * 0.45); ctx.stroke(); } break;
+      case "sausage": ctx.fillStyle = "#e2553f"; ctx.beginPath(); ctx.ellipse(0, 0, r, r * 0.55, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = "#ffd2c4"; for (let i = -1; i <= 1; i++) { ctx.beginPath(); ctx.moveTo(i * r * 0.45 - r * 0.1, -r * 0.28); ctx.lineTo(i * r * 0.45 + r * 0.1, r * 0.28); ctx.stroke(); } break;
+      case "kimbap": circle(0, 0, r, "#22262a"); circle(0, 0, r * 0.78, "#fbfaf4"); circle(-r * 0.25, -r * 0.2, r * 0.2, "#f6c945"); circle(r * 0.25, -r * 0.15, r * 0.18, "#e85d3a"); circle(0, r * 0.25, r * 0.2, "#4caf50"); break;
+      case "tomato": circle(0, r * 0.05, r * 0.85, "#e8323a"); ctx.beginPath(); ctx.arc(0, r * 0.05, r * 0.85, 0, Math.PI * 2); ctx.stroke(); circle(0, -r * 0.7, r * 0.18, "#3f9a3a"); circle(-r * 0.3, -r * 0.15, r * 0.14, "rgba(255,255,255,.7)"); break;
+      case "riceball": ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.moveTo(0, -r); ctx.quadraticCurveTo(r * 1.15, r * 0.85, 0, r * 0.85); ctx.quadraticCurveTo(-r * 1.15, r * 0.85, 0, -r); ctx.fill(); ctx.stroke();
+        roundRect(-r * 0.42, r * 0.2, r * 0.84, r * 0.62, r * 0.08); ctx.fillStyle = "#20302a"; ctx.fill(); break;
+    }
+  }
+  ctx.restore();
+}
+
+function drawPlayer(wx, wy, color, name, mine, ghost, id) {
+  const x = sx(wx), y = sy(wy), r = PLAYER_R * S;
+  ctx.globalAlpha = ghost ? 0.45 : 1;
+  ctx.fillStyle = "rgba(0,0,0,.15)"; ctx.beginPath(); ctx.ellipse(x, y + r * 0.9, r * 0.9, r * 0.3, 0, 0, Math.PI * 2); ctx.fill();
+  circle(x, y, r, color);
+  if (mine) { ctx.strokeStyle = "#5a3214"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, r + 3, 0, Math.PI * 2); ctx.stroke(); }
+  circle(x - r * 0.32, y - r * 0.15, r * 0.2, "#fff"); circle(x + r * 0.32, y - r * 0.15, r * 0.2, "#fff");
+  circle(x - r * 0.28, y - r * 0.12, r * 0.1, "#222"); circle(x + r * 0.36, y - r * 0.12, r * 0.1, "#222");
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = Math.max(1.5, r * 0.1); ctx.beginPath(); ctx.arc(x, y + r * 0.2, r * 0.3, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+  const label = mine ? `${name} (나)` : name;
+  text(label, x, y - r - 12, Math.max(13, Math.min(15, r * 0.5)), "center", "800", "#5a3214");
+  ctx.globalAlpha = 1;
+  const b = bubbles[id];
+  if (b && b.until > now()) {
+    roundRect(x - 22, y - r - 58, 44, 34, 17); ctx.fillStyle = "#fff"; ctx.fill();
+    text(b.icon, x, y - r - 41, 20, "center", "normal", "#000");
+  }
+}
+
+function drawHud(t) {
+  const fs = clamp(Math.min(W, H) * 0.045, 16, 22);
+  const y1 = HUD_Y + 28;
+  const myScore = state.scores[myId] || 0;
+  if (state.phase === "play" || state.phase === "result") {
+    text(`${myScore}점`, Math.max(16, OX), y1, fs, "left", "900", "#5a3214");
+    const left = Math.max(0, Math.ceil((state.endsAt - t) / 1000));
+    if (state.phase === "play") text(`남은 시간 ${left}초`, W / 2, y1, fs, "center", "900", left <= 10 ? "#c2410c" : "#5a3214");
+  } else {
+    text(online ? `방 ${humans.length}명` : "혼자 모드", Math.max(16, OX), y1, Math.max(14, fs * 0.8), "left", "800", "#5a3214");
+  }
+  // 점수판: 돗자리 바로 위에 한 줄(좁으면 두 줄)로
+  if (state.phase !== "play") return;
+  const small = 14;
+  ctx.font = `700 ${small}px -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`;
+  const chips = ranking().map((r) => {
+    const label = `${participantName(r.id)}${r.id === myId ? "(나)" : ""} ${r.score}`;
+    return { r, label, w: ctx.measureText(label).width + 26 };
+  });
+  const lines = [[]];
+  let lineW = 0;
+  for (const c of chips) {
+    if (lineW + c.w > W - 24 && lines[lines.length - 1].length) { lines.push([]); lineW = 0; }
+    lines[lines.length - 1].push(c); lineW += c.w;
+  }
+  lines.forEach((line, li) => {
+    const total = line.reduce((a, c) => a + c.w, 0);
+    let x = (W - total) / 2;
+    const y = HUD_Y + (lines.length > 1 ? 56 + li * 20 : 64);
+    for (const c of line) {
+      circle(x + 8, y, 5, colorOf(c.r.id));
+      text(c.label, x + 17, y, small, "left", c.r.id === myId ? "900" : "700", "#5a3214");
+      x += c.w;
+    }
+  });
+}
+
+function panel(w, h) {
+  const x = (W - w) / 2, y = (H - h) / 2;
+  ctx.fillStyle = "rgba(60,30,10,.35)"; ctx.fillRect(0, 0, W, H);
+  roundRect(x, y, w, h, 18); ctx.fillStyle = "#fff6e6"; ctx.fill();
+  return { x, y };
+}
+function drawLobby(t) {
+  const w = Math.min(W - 24, 440), h = Math.min(H - 40, 300), { y } = panel(w, h);
+  const big = clamp(w * 0.085, 22, 34), fs = clamp(w * 0.042, 14, 18), small = Math.max(14, fs * 0.85);
+  text("반찬 쟁탈전", W / 2, y + h * 0.13, big, "center", "900", "#5a3214");
+  text(online ? `다른 플레이어를 기다리는 중 (${humans.length}/4)` : "혼자 모드 · 컴퓨터와 함께해요", W / 2, y + h * 0.29, fs, "center", "700", "#5a3214");
+  text("60초 동안 돗자리 위 반찬을 먼저 주워요", W / 2, y + h * 0.42, small, "center", "500", "#7a5a3a");
+  text(W < 520 ? "손가락으로 누른 채 끌어서 움직여요" : "방향키·WASD나 마우스 클릭으로 움직여요", W / 2, y + h * 0.53, small, "center", "500", "#7a5a3a");
+  const wait = humans.length >= 2 ? 5000 : 10000;
+  const left = Math.max(0, Math.ceil((wait - (t - (lobbySince || t))) / 1000));
+  const pulse = 0.9 + Math.sin(t / 300) * 0.1;
+  text("탭하거나 스페이스를 눌러 시작", W / 2, y + h * 0.71, fs * 1.1 * pulse, "center", "900", "#c2410c");
+  text(isHost() ? `${left}초 뒤에 자동으로 시작해요` : "방장이 곧 시작해요", W / 2, y + h * 0.87, small, "center", "500", "#7a5a3a");
+}
+function drawCount(t) {
+  const left = Math.max(1, Math.ceil((state.endsAt - t) / 1000));
+  ctx.fillStyle = "rgba(60,30,10,.25)"; ctx.fillRect(0, 0, W, H);
+  text(String(left), W / 2, H / 2, clamp(Math.min(W, H) * 0.25, 60, 160), "center", "900", "#fff");
+  if (!state.roster.some((p) => p.id === myId)) text("이번 판은 구경해요. 다음 판부터 같이 해요!", W / 2, H / 2 + 90, 16, "center", "700", "#fff");
+}
+function drawResult() {
+  const rows = ranking();
+  const w = Math.min(W - 24, 400), h = Math.min(H - 40, 150 + rows.length * 40), { y } = panel(w, h);
+  text("점심시간 끝!", W / 2, y + 36, clamp(w * 0.08, 22, 30), "center", "900", "#5a3214");
+  const medals = ["🥇", "🥈", "🥉", "4"];
+  rows.forEach((r, i) => {
+    const yy = y + 84 + i * 40;
+    text(medals[i], W / 2 - w * 0.36, yy, 20, "center", "normal", "#5a3214");
+    circle(W / 2 - w * 0.26, yy, 7, colorOf(r.id));
+    text(participantName(r.id) + (r.id === myId ? " (나)" : ""), W / 2 - w * 0.2, yy, 16, "left", r.id === myId ? "900" : "600", "#5a3214");
+    text(`${r.score}점`, W / 2 + w * 0.38, yy, 16, "right", "900", "#c2410c");
+  });
+  const nextIn = Math.max(0, Math.ceil((state.endsAt - now()) / 1000));
+  text(`${nextIn}초 뒤 대기실로 가요 · 아래 이모티콘으로 인사해보세요`, W / 2, y + h - 26, 14, "center", "500", "#7a5a3a");
+}
+
+/* ===== 그리기 도구 ===== */
+function circle(x, y, r, color) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function text(s, x, y, size, align = "center", weight = "normal", color = "#fff") {
+  ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = "middle";
+  ctx.font = `${weight} ${size}px -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`;
+  ctx.fillText(s, x, y);
+}
+
+/* ===== 메인 루프 ===== */
+let last = now();
+function loop(t) {
+  const dt = Math.min(0.05, (t - last) / 1000);
+  last = t;
+  // iframe 크기가 늦게 잡히면 resize 이벤트가 안 올 수 있어서 매 프레임 확인해요
+  if (window.innerWidth !== W || window.innerHeight !== H) resize();
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
