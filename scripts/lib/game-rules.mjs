@@ -40,7 +40,13 @@ export function validateGameJson(meta) {
   if (!["asc", "desc"].includes(meta.score_order)) errors.push("score_order는 asc 또는 desc여야 해요");
   if (meta.ai_tool !== "Claude") errors.push('ai_tool은 "Claude"여야 해요');
   if (meta.idea !== undefined && (!str(meta.idea) || !meta.idea.trim())) errors.push("idea는 글자여야 해요 (없으면 항목을 빼요)");
-  const known = ["title", "description", "howto", "category", "tags", "controls", "leaderboard", "score_order", "ai_tool", "idea"];
+  if (meta.multiplayer !== undefined && typeof meta.multiplayer !== "boolean") errors.push("multiplayer는 true 또는 false여야 해요");
+  if (meta.multiplayer === true) {
+    if (!Number.isInteger(meta.max_players) || meta.max_players < 2 || meta.max_players > 8) errors.push("멀티 게임은 max_players가 2~8이어야 해요");
+  } else if (meta.max_players !== undefined) {
+    errors.push("max_players는 멀티 게임(multiplayer: true)에만 적어요");
+  }
+  const known = ["title", "description", "howto", "category", "tags", "controls", "leaderboard", "score_order", "ai_tool", "idea", "multiplayer", "max_players"];
   for (const k of Object.keys(meta)) if (!known.includes(k)) errors.push(`모르는 항목이 있어요: ${k}`);
   return errors;
 }

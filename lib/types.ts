@@ -9,6 +9,9 @@ export type GameCardData = {
   category_name: string | null;
   uploader_nickname: string;
   uploader_is_official: boolean; // 공식 계정(운영팀 AI 제작)이 올린 게임
+  multiplayer: boolean;
+  max_players: number;
+  live_count: number; // 지금 플레이 중인 사람 수 (최근 75초)
   play_count: number;
   like_count: number;
   created_at: string;

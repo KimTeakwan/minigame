@@ -150,6 +150,25 @@ npm run worker -- --watch # 30초마다 계속 확인
 - 만들었으면 하는 게임: `games/IDEAS.md`의 "대기"에 한 줄로 적어요.
 - 검토 안 한 게임 PR이 3개 이상 쌓이면 새 게임은 쉬어요.
 
+### 10. 접속자 수와 멀티플레이
+
+- **접속자 수**: 게임 화면을 보고 있는 사람 수예요. 플레이 화면이 30초마다 알려주고, 75초 동안 소식이 없으면 빠져요. 따로 설정할 건 없어요.
+- **멀티플레이**: 업로드할 때 "멀티 게임"을 켠 게임은 같은 게임을 하는 사람들이 방(2~8명)에 모여 같이 해요. 실시간 메시지는 Supabase Realtime으로 오가요.
+
+**한 번만 설정하면 돼요**
+1. Supabase 대시보드 > **Realtime** > **Settings**에서 **Allow public access**를 꺼요. 그래야 방에 들어온 사람만 그 방 메시지를 주고받을 수 있어요 (권한 규칙은 DB 마이그레이션에 들어 있어요).
+
+**요금제 한도** (Supabase Realtime)
+
+| | 무료 | Pro ($25/월) |
+| --- | --- | --- |
+| 동시 연결 (멀티 방에 있는 사람) | 200명 | 500명 (넘으면 1,000명당 $10) |
+| 초당 메시지 | 100개 | 500개 |
+
+멀티 게임 한 방(4명)이 1초에 4번씩 주고받으면 받는 쪽까지 합쳐 초당 수십 개를 써요. 무료로는 동시에 몇 개 방만 돌릴 수 있으니, 멀티 이용자가 늘면 Pro로 올려요. 접속자 수 표시는 Realtime을 쓰지 않아서 이 한도와 상관없어요.
+
+**멀티 게임 미리보기**: `games/_preview/multi.html?game=<게임 폴더>&players=2`를 브라우저로 열면 한 화면에서 두 명으로 해볼 수 있어요.
+
 ---
 
 ## 폴더 구조
@@ -167,10 +186,10 @@ app/                   화면 (주소 = 폴더 이름)
   login/, onboarding/  가입·로그인, 닉네임·만 14세 확인
   api/upload/          업로드 주소 발급, 업로드 완료 처리
 components/            화면 조각 (게임 카드, 헤더, 업로드 폼 등)
-lib/                   Supabase·R2 연결, 상수
+lib/                   Supabase·R2 연결, 상수, 멀티 중계(multiplayer.ts)
 proxy.ts               로그인 안 한 사람을 로그인 화면으로 보내요
-public/sdk.js          리더보드 SDK (게임 안에서 점수 보내기)
-games/                 공식 게임 (에이전트 제작, 규칙은 games/README.md)
+public/sdk.js          게임 SDK (점수 보내기, 멀티플레이)
+games/                 공식 게임 (에이전트 제작, 규칙은 games/README.md), 멀티 미리보기(_preview/)
 scripts/review-worker.mjs        자동 검수 워커
 scripts/check-game.mjs           공식 게임 브라우저 검사
 scripts/publish-official-games.mjs  합쳐진 공식 게임을 사이트에 올리기
@@ -188,6 +207,9 @@ supabase/migrations/   DB 테이블·권한·함수 (GitHub에 올리면 자동 
 | 하루 업로드 | 5개 | `lib/constants.ts` + DB 함수 `create_game_upload` |
 | 신고 자동 비공개 | 서로 다른 3명 | DB 함수 `on_report_created` |
 | 계정 제재 | 1회 경고 / 2회 7일 정지 / 3회 영구 | DB 함수 `apply_strike` |
+| 접속 중 판단 | 마지막 소식 75초 이내 (30초마다 알림) | DB 함수 `live_cutoff` + `components/game/GamePlayer.tsx`의 `HEARTBEAT_MS` |
+| 멀티 메시지 제한 | 2KB, 1초에 10개 | `lib/multiplayer.ts` + `games/_preview/multi.html` |
+| 멀티 방 인원 | 2~8명 | DB 마이그레이션의 `games_max_players_check` + `set_game_multiplayer` |
 
 DB 함수의 숫자를 바꿀 땐 `supabase/migrations/`에 새 파일을 만들고, 첫 마이그레이션에서 그 함수를 복사해
 숫자만 고친 `create or replace function ...`을 넣어서 올리면 돼요.

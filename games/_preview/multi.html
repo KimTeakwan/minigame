@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>멀티 미리보기</title>
+<!--
+  멀티 게임 미리보기 (사이트 없이 한 화면에서 여러 명 플레이)
+  - 게임을 사이트처럼 sandbox iframe에 띄우고, 이 페이지가 가짜 중계기 역할을 해요.
+  - 실제 사이트의 중계기(lib/multiplayer.ts)와 같은 메시지 규칙·제한(2KB, 1초 10개, 이모티콘 6개)을 따라요.
+  - scripts/check-game.mjs도 이 페이지로 게임을 검사해요.
+
+  주소 예:
+    multi.html?game=lunchbox-catch             (games/ 폴더의 게임, 2명)
+    multi.html?game=<slug>&players=3&late=5    (3명, 마지막 사람은 5초 뒤에 들어와요)
+    multi.html?src=<게임 주소>&players=1&tags=0 (검사용)
+  각 화면을 클릭하면 그 플레이어로 조작해요. 이름표의 ✕를 누르면 그 플레이어가 나가요.
+-->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
+  #grid { display: grid; width: 100vw; height: 100vh; gap: 2px; }
+  .cell { position: relative; min-width: 0; min-height: 0; background: #000; }
+  .cell iframe { display: block; width: 100%; height: 100%; border: 0; }
+  .tag {
+    position: absolute; left: 6px; bottom: 6px; display: flex; gap: 6px; align-items: center;
+    padding: 2px 4px 2px 8px; border-radius: 8px; background: rgba(0,0,0,.6); color: #fff;
+    font: 12px/1.6 -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  }
+  .tag button { border: 0; border-radius: 6px; background: rgba(255,255,255,.2); color: #fff; cursor: pointer; font-size: 11px; }
+  .bubble {
+    position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%); pointer-events: none;
+    padding: 4px 12px; border-radius: 999px; background: #fff; color: #111; white-space: nowrap;
+    font: bold 14px -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  }
+  #msg { position: fixed; left: 50%; top: 40%; transform: translate(-50%, -50%); color: #fff; font: 16px sans-serif; }
+</style>
+</head>
+<body>
+<div id="grid"></div>
+<div id="msg"></div>
+<script>
+(function () {
+  var MAX_BYTES = 2048, MAX_PER_SEC = 10;
+  var EMOTES = { hi: "👋 안녕!", gg: "🤝 GG", again: "🔁 한 판 더", wow: "😮 대단해요", oops: "😅 앗", thanks: "🙏 고마워요" };
+
+  var q = new URLSearchParams(location.search);
+  var N = Math.max(1, Math.min(4, parseInt(q.get("players") || "2", 10) || 2));
+  var src = q.get("src") || (q.get("game") ? "../" + encodeURIComponent(q.get("game")) + "/index.html" : null);
+  var late = Math.max(0, Number(q.get("late") || 0));
+  var showTags = N > 1 && q.get("tags") !== "0";
+  var grid = document.getElementById("grid");
+
+  if (!src) { document.getElementById("msg").textContent = "주소 끝에 ?game=<게임 폴더 이름> 을 붙여주세요"; return; }
+
+  // 검사 스크립트가 읽는 기록
+  window.__msgs = [];
+  var stats = window.__mp = { joins: 0, sends: {}, delivered: 0, violations: [], emotes: 0, locks: 0 };
+  var frames = [];
+  var order = 0;
+
+  function layout() {
+    var wide = innerWidth >= innerHeight;
+    var cols = N === 1 ? 1 : N === 2 ? (wide ? 2 : 1) : 2;
+    var rows = Math.ceil(N / cols);
+    grid.style.gridTemplateColumns = "repeat(" + cols + ", 1fr)";
+    grid.style.gridTemplateRows = "repeat(" + rows + ", 1fr)";
+  }
+  addEventListener("resize", layout);
+  layout();
+
+  function addFrame(i) {
+    var cell = document.createElement("div");
+    cell.className = "cell";
+    cell.style.order = String(i);
+    var iframe = document.createElement("iframe");
+    iframe.setAttribute("sandbox", "allow-scripts allow-pointer-lock");
+    iframe.setAttribute("allow", "autoplay");
+    iframe.title = "플레이어" + (i + 1);
+    iframe.src = src;
+    cell.appendChild(iframe);
+    var f = { id: "p" + (i + 1), name: "플레이어" + (i + 1), iframe: iframe, cell: cell, joined: false, joinedAt: 0, tokens: MAX_PER_SEC, refill: Date.now() };
+    if (showTags) {
+      var tag = document.createElement("div");
+      tag.className = "tag";
+      tag.textContent = f.name + " ";
+      var x = document.createElement("button");
+      x.textContent = "✕ 나가기";
+      x.onclick = function () { remove(f); };
+      tag.appendChild(x);
+      cell.appendChild(tag);
+    }
+    grid.appendChild(cell);
+    frames.push(f);
+  }
+  for (var i = 0; i < N; i++) {
+    if (late > 0 && i === N - 1 && N > 1) (function (k) { setTimeout(function () { addFrame(k); }, late * 1000); })(i);
+    else addFrame(i);
+  }
+
+  function post(f, msg) { if (f.iframe.contentWindow) f.iframe.contentWindow.postMessage(msg, "*"); }
+  function players() {
+    return frames.filter(function (f) { return f.joined; })
+      .sort(function (a, b) { return a.joinedAt - b.joinedAt; })
+      .map(function (f) { return { id: f.id, name: f.name, joinedAt: f.joinedAt }; });
+  }
+  function hostId() { var p = players(); return p.length ? p[0].id : null; }
+  function broadcastPlayers() {
+    var list = players(), host = hostId();
+    frames.forEach(function (f) { if (f.joined) post(f, { type: "GAMESDK_MP_PLAYERS", players: list, hostId: host }); });
+  }
+  function remove(f) {
+    f.joined = false;
+    frames = frames.filter(function (x) { return x !== f; });
+    f.cell.remove();
+    broadcastPlayers();
+  }
+  function take(f) {
+    var now = Date.now();
+    f.tokens = Math.min(MAX_PER_SEC, f.tokens + (now - f.refill) / 1000 * MAX_PER_SEC);
+    f.refill = now;
+    if (f.tokens < 1) return false;
+    f.tokens -= 1;
+    return true;
+  }
+  function violation(f, text) {
+    stats.violations.push(f.name + ": " + text);
+    post(f, { type: "GAMESDK_MP_ERROR", message: text });
+  }
+  function bubble(f, text) {
+    var b = document.createElement("div");
+    b.className = "bubble";
+    b.textContent = text;
+    f.cell.appendChild(b);
+    setTimeout(function () { b.remove(); }, 2500);
+  }
+
+  addEventListener("message", function (e) {
+    var f = frames.filter(function (x) { return x.iframe.contentWindow === e.source; })[0];
+    if (!f) return;
+    var m = e.data;
+    if (!m || typeof m !== "object" || typeof m.type !== "string") return;
+    window.__msgs.push(m);
+
+    if (m.type === "GAMESDK_MP_JOIN") {
+      if (!f.joined) { f.joined = true; f.joinedAt = Date.now() + (order++) / 1000; stats.joins++; }
+      post(f, { type: "GAMESDK_MP_JOINED", roomId: "local", me: { id: f.id, name: f.name }, players: players(), hostId: hostId(), maxPlayers: N });
+      broadcastPlayers();
+    } else if (m.type === "GAMESDK_MP_SEND") {
+      if (!f.joined) return;
+      var size;
+      try { size = new TextEncoder().encode(JSON.stringify(m.data === undefined ? null : m.data)).length; }
+      catch (err) { return violation(f, "JSON으로 바꿀 수 없는 데이터를 보냈어요"); }
+      if (size > MAX_BYTES) return violation(f, "메시지가 너무 커요 (" + size + "바이트, 최대 " + MAX_BYTES + ")");
+      if (!take(f)) return violation(f, "메시지를 너무 자주 보내요 (1초에 " + MAX_PER_SEC + "개까지)");
+      stats.sends[f.id] = (stats.sends[f.id] || 0) + 1;
+      frames.forEach(function (o) { if (o !== f && o.joined) { post(o, { type: "GAMESDK_MP_MESSAGE", from: f.id, data: m.data }); stats.delivered++; } });
+    } else if (m.type === "GAMESDK_MP_EMOTE") {
+      if (!f.joined || !EMOTES[m.key] || !take(f)) return;
+      stats.emotes++;
+      bubble(f, EMOTES[m.key]);
+      frames.forEach(function (o) { if (o !== f && o.joined) post(o, { type: "GAMESDK_MP_EMOTE", from: f.id, key: m.key }); });
+    } else if (m.type === "GAMESDK_MP_LOCK") {
+      stats.locks++;
+    } else if (m.type === "GAMESDK_MP_LEAVE") {
+      f.joined = false;
+      broadcastPlayers();
+    }
+  });
+})();
+</script>
+</body>
+</html>

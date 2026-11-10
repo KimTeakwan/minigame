@@ -52,12 +52,14 @@
 ![플레이 화면](https://raw.githubusercontent.com/KimTeakwan/minigame/<브랜치>/games/<slug>/thumbnail.png)
 
 **▶ 바로 플레이해보기:** https://raw.githack.com/KimTeakwan/minigame/<브랜치>/games/<slug>/index.html
+**▶ 멀티로 해보기 (멀티 게임만):** https://raw.githack.com/KimTeakwan/minigame/<브랜치>/games/_preview/multi.html?game=<slug>&players=2 — 한 화면에 두 명, 클릭한 쪽이 조작돼요
 
 | 항목 | 내용 |
 |---|---|
 | 카테고리 | <category> |
 | 조작 | 키보드: ... / 터치: ... |
 | 리더보드 | 있음 (높을수록 좋아요 / 낮을수록 좋아요) 또는 없음 |
+| 멀티 | 혼자 하는 게임 / 멀티 최대 N명 (혼자면 컴퓨터 상대) |
 | 태그 | <tags> |
 | 아이디어 | IDEAS.md: "<줄>" 또는 기획 에이전트가 정함 |
 
@@ -70,7 +72,7 @@
 - 손맛:
 
 ### 검수 기록
-- 자동 검사: 통과 (PC 800×600 · 휴대폰 세로 390×844 · 휴대폰 가로 844×390)
+- 자동 검사: 통과 (PC 800×600 · 휴대폰 세로 390×844 · 휴대폰 가로 844×390 · 멀티 게임은 2명)
 - 검수: 1차 FAIL (<사유>) → 수정 → 2차 PASS   ← 실제 기록 그대로
 - 경고: <없으면 없음>
 

@@ -15,6 +15,8 @@ type Existing = {
   ai_tool: string | null;
   leaderboard_enabled: boolean;
   score_order: "asc" | "desc";
+  multiplayer: boolean;
+  max_players: number;
 } | null;
 
 type Props = {
@@ -36,6 +38,8 @@ export default function UploadForm({ categories, existing, nickname, siteUrl }: 
   const [controls, setControls] = useState<string | null>(existing?.controls ?? null);
   const [leaderboard, setLeaderboard] = useState(existing?.leaderboard_enabled ?? false);
   const [scoreOrder, setScoreOrder] = useState<"asc" | "desc">(existing?.score_order ?? "desc");
+  const [multiplayer, setMultiplayer] = useState(existing?.multiplayer ?? false);
+  const [maxPlayers, setMaxPlayers] = useState(existing?.multiplayer ? existing.max_players : 4);
   const [agreed, setAgreed] = useState(false);
   const [step, setStep] = useState<Step>("form");
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +94,8 @@ export default function UploadForm({ categories, existing, nickname, siteUrl }: 
           aiTool: form.get("aiTool") || null,
           leaderboard,
           scoreOrder,
+          multiplayer,
+          maxPlayers,
           file: { name: file.name, size: file.size, type: fileType },
           thumbnail: thumb ? { name: thumb.name, size: thumb.size, type: thumb.type } : null,
         }),
@@ -230,7 +236,44 @@ GameSDK.submitScore(점수);`}</pre>
           )}
         </Card>
 
-        <Card title="5. 확인">
+        <Card title="5. 멀티플레이">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[13px] text-muted">켜면 같은 게임을 하는 사람들이 방에 모여 실시간으로 같이 놀 수 있어요</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={multiplayer}
+              aria-label="멀티 게임"
+              onClick={() => setMultiplayer((v) => !v)}
+              className={`relative h-8 w-14 flex-none rounded-full ${multiplayer ? "bg-accent" : "bg-[#B9B7AE]"}`}
+            >
+              <span aria-hidden="true" className={`absolute top-1 h-6 w-6 rounded-full bg-white transition-all ${multiplayer ? "left-7" : "left-1"}`} />
+            </button>
+          </div>
+          {multiplayer && (
+            <>
+              <ChipGroup
+                legend="한 방 최대 인원"
+                options={[2, 3, 4, 5, 6, 7, 8].map((n) => ({ value: String(n), label: `${n}명` }))}
+                value={String(maxPlayers)}
+                onChange={(v) => setMaxPlayers(Number(v))}
+              />
+              <div className="flex flex-col gap-1.5">
+                <span className="text-sm font-bold">게임 코드에서 쓰는 법</span>
+                <pre className="m-0 overflow-x-auto rounded-[10px] bg-ink px-4 py-3.5 font-mono text-[13px] leading-relaxed text-chip">{`<script src="${siteUrl}/sdk.js"></script>
+GameSDK.multi.join().then(room => { /* room.players, room.me */ })
+  .catch(() => { /* 혼자·컴퓨터 상대로 시작 */ });
+GameSDK.multi.on("message", (data, fromId) => { ... });
+GameSDK.multi.send({ x, y });   // 1초에 10개, 2KB까지`}</pre>
+                <span className="text-[13px] text-muted">
+                  플레이어끼리 자유 채팅은 넣을 수 없어요. 대화는 사이트의 이모티콘 버튼으로 해요. 아무도 없을 때도 혼자 즐길 수 있게 만들어주세요.
+                </span>
+              </div>
+            </>
+          )}
+        </Card>
+
+        <Card title="6. 확인">
           <label className="flex items-start gap-2.5">
             <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} className="mt-0.5 h-5 w-5 flex-none accent-accent" />
             <span className="flex flex-col gap-0.5">

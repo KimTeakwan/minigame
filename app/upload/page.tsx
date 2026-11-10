@@ -32,7 +32,7 @@ export default async function UploadPage({ searchParams }: { searchParams: Searc
     gameId
       ? supabase
           .from("games")
-          .select("id,title,description,howto,category_id,tags,controls,ai_tool,leaderboard_enabled,score_order")
+          .select("id,title,description,howto,category_id,tags,controls,ai_tool,leaderboard_enabled,score_order,multiplayer,max_players")
           .eq("id", gameId)
           .eq("uploader_id", user.id)
           .maybeSingle()
