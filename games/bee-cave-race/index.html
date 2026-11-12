@@ -1,0 +1,1589 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>붕붕 꿀벌 동굴 레이스</title>
+<style>
+  /* 창을 꽉 채우고 스크롤·선택·길게 누르기 메뉴를 막아요 */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1d1530; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #mute {
+    position: fixed; top: 10px; right: 10px; width: 40px; height: 40px; border: 0; border-radius: 10px;
+    background: rgba(255,255,255,.14); color: #fff; font-size: 18px; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="mute" aria-label="소리 끄기">🔊</button>
+<script>
+/* ===== 게임 SDK: 리더보드 + 멀티 (public/sdk.js와 같은 코드. 지우지 마세요) ===== */
+/* 멀티 게임 쓰는 법은 games/README.md의 "멀티 게임"을 보세요 */
+(function () {
+  var sent = false;
+  var standalone = window.parent === window; // 파일을 직접 열었을 때
+  var listeners = { message: [], players: [], emote: [], error: [] };
+  var room = { joined: false, roomId: null, me: null, players: [], hostId: null, maxPlayers: 0 };
+  var waiting = [];
+
+  function post(msg) {
+    if (!standalone) window.parent.postMessage(msg, "*");
+  }
+  function emit(name, a, b) {
+    var list = listeners[name] || [];
+    for (var i = 0; i < list.length; i++) {
+      try { list[i](a, b); } catch (e) { setTimeout(function () { throw e; }); }
+    }
+  }
+  function settle(ok, value) {
+    var list = waiting;
+    waiting = [];
+    for (var i = 0; i < list.length; i++) {
+      clearTimeout(list[i].timer);
+      ok ? list[i].resolve(value) : list[i].reject(new Error(value));
+    }
+  }
+
+  window.addEventListener("message", function (event) {
+    if (standalone || event.source !== window.parent) return; // 바깥 플레이 페이지에서 온 것만
+    var m = event.data;
+    if (!m || typeof m !== "object") return;
+    if (m.type === "GAMESDK_MP_JOINED") {
+      room = { joined: true, roomId: m.roomId, me: m.me, players: m.players || [], hostId: m.hostId, maxPlayers: m.maxPlayers };
+      settle(true, { roomId: room.roomId, me: room.me, players: room.players, hostId: room.hostId, maxPlayers: room.maxPlayers });
+      emit("players", room.players, room.hostId);
+    } else if (m.type === "GAMESDK_MP_PLAYERS") {
+      room.players = m.players || [];
+      room.hostId = m.hostId;
+      emit("players", room.players, room.hostId);
+    } else if (m.type === "GAMESDK_MP_MESSAGE") {
+      emit("message", m.data, m.from);
+    } else if (m.type === "GAMESDK_MP_EMOTE") {
+      emit("emote", m.key, m.from);
+    } else if (m.type === "GAMESDK_MP_ERROR") {
+      if (!room.joined) settle(false, m.message);
+      emit("error", m.message);
+    }
+  });
+
+  window.GameSDK = {
+    submitScore: function (score) {
+      if (sent) return; // 한 판에 한 번만
+      if (typeof score !== "number" || !isFinite(score)) return;
+      sent = true;
+      post({ type: "GAMESDK_SCORE", score: score });
+    },
+    // 새 판을 시작할 때 부르면 다시 점수를 보낼 수 있어요.
+    newRound: function () {
+      sent = false;
+      post({ type: "GAMESDK_NEW_ROUND" });
+    },
+    multi: {
+      join: function () {
+        return new Promise(function (resolve, reject) {
+          if (standalone) return reject(new Error("사이트 밖에서는 멀티를 쓸 수 없어요"));
+          var w = { resolve: resolve, reject: reject, timer: 0 };
+          w.timer = setTimeout(function () {
+            waiting = waiting.filter(function (x) { return x !== w; });
+            reject(new Error("방에 들어가지 못했어요 (응답 없음)"));
+          }, 8000);
+          waiting.push(w);
+          post({ type: "GAMESDK_MP_JOIN" });
+        });
+      },
+      send: function (data) { if (room.joined) post({ type: "GAMESDK_MP_SEND", data: data }); },
+      emote: function (key) { if (room.joined) post({ type: "GAMESDK_MP_EMOTE", key: key }); },
+      lock: function (locked) { if (room.joined) post({ type: "GAMESDK_MP_LOCK", locked: locked !== false }); },
+      leave: function () {
+        if (!room.joined) return;
+        room = { joined: false, roomId: null, me: null, players: [], hostId: null, maxPlayers: 0 };
+        post({ type: "GAMESDK_MP_LEAVE" });
+      },
+      on: function (name, fn) { if (listeners[name] && typeof fn === "function") listeners[name].push(fn); },
+      me: function () { return room.me; },
+      players: function () { return room.players.slice(); },
+      hostId: function () { return room.hostId; },
+      isHost: function () { return !!room.me && room.me.id === room.hostId; },
+    },
+  };
+})();
+
+/* =====================================================================
+   붕붕 꿀벌 동굴 레이스 — 꾹 누르면 떠오르고 떼면 내려가는 원버튼 비행 (최대 4명)
+   멀티 구조
+   - 방장(먼저 들어온 사람)이 판 번호·시드·참가자 명단·단계 전환·컴퓨터 꿀벌을 맡고 상태("s")를 보내요.
+   - 동굴은 시드로 만들어서 모두에게 똑같아요 (200단위 구간마다 난수 7개를 늘 같은 순서로 써요).
+   - 각자 자기 꿀벌만 자기 화면에서 계산하고 위치("p")를 보내요. 거리는 "출발 뒤 지난 시간"으로 정해져요.
+   - 혼자거나 멀티 연결이 안 되면 내가 방장이고 컴퓨터 꿀벌과 날아요.
+   ===================================================================== */
+const BAND = 600, BEE_X = 100, VIEW_AHEAD = 420;
+const EXIT_X = 75000, UNIT_PER_M = 50;
+const EXIT_T_MS = (50 + (EXIT_X - 19000) / 480) * 1000;
+const COUNT_MS = 3000, RESULT_MS = 6000, TIMEOUT_MS = 3000, RESULT_CARD_DELAY = 900;
+const ME_COLOR = "#ffc93c", OTHER_COLORS = ["#ff8fb8", "#6fe0c0", "#8fb8ff", "#c9a0ff"];
+const BOT_NAMES = ["컴퓨터 하나", "컴퓨터 둘", "컴퓨터 셋"];
+const EMOTE_ICONS = { hi: "👋", gg: "🤝", again: "🔁", wow: "😮", oops: "😅", thanks: "🙏" };
+const FONT = '-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif';
+const TAU = Math.PI * 2;
+const now = () => performance.now();
+
+// ---- 동굴·물리 (시작) ----
+const SEG = 200, NSEG = 400, NR = 7;
+const BEE_R = 22, HIT_R = 15, HONEY_HIT = 29;
+const UP_ACC = 1400, DOWN_ACC = 1200, VMAX = 420, HOVER_T = 1.5;
+const STEP = 1 / 60;
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+// 통로 높이: 거리(m)별 선형 보간
+const GAP_M = [0, 60, 200, 480, 1050, 1500], GAP_V = [420, 380, 270, 200, 165, 130];
+function gapAt(x) {
+  const m = x / UNIT_PER_M;
+  if (m <= 0) return GAP_V[0];
+  for (let i = 1; i < GAP_M.length; i++) {
+    if (m <= GAP_M[i]) return GAP_V[i - 1] + (GAP_V[i] - GAP_V[i - 1]) * (m - GAP_M[i - 1]) / (GAP_M[i] - GAP_M[i - 1]);
+  }
+  return GAP_V[GAP_V.length - 1];
+}
+// 속도: 280에서 1초마다 +4, 50초 뒤 480에서 멈춰요. 거리는 시간만으로 정해져요.
+function distAt(t) { return t <= 0 ? 0 : t <= 50 ? 280 * t + 2 * t * t : 19000 + 480 * (t - 50); }
+function speedAtDist(x) { return x >= 19000 ? 480 : Math.sqrt(78400 + 8 * Math.max(0, x)); }
+
+const cC = new Float32Array(NSEG + 2);   // 제어점 중심 높이
+const obT = new Uint8Array(NSEG + 2);    // 0 없음, 1 종유석(위), 2 석순(아래), 3 떠 있는 바위
+const obA = new Float32Array(NSEG + 2);  // 종유석·석순: 튀어나온 길이 / 바위: 윗변 y
+const obB = new Float32Array(NSEG + 2);  // 종유석·석순: 반폭 / 바위: 높이
+const hnY = new Float32Array(NSEG + 2);  // 꿀방울 y (x = 200k + 100), 없으면 -1
+const RN = new Float32Array((NSEG + 2) * NR);
+let caveSeed = -1;
+
+function centerAt(x) {
+  if (x <= 0) return cC[0];
+  let k = Math.floor(x / SEG);
+  if (k >= NSEG) return cC[NSEG];
+  const f = (x - k * SEG) / SEG, s = f * f * (3 - 2 * f);
+  return cC[k] + (cC[k + 1] - cC[k]) * s;
+}
+function ceilAt(x) { return centerAt(x) - gapAt(x) / 2; }
+function floorAt(x) { return centerAt(x) + gapAt(x) / 2; }
+
+function buildCave(seed) {
+  if (seed === caveSeed) return;
+  caveSeed = seed;
+  const rnd = mulberry32(seed);
+  for (let i = 0; i < RN.length; i++) RN[i] = rnd(); // 구간마다 7개씩 (중심, 장애물 여부, 종류, 크기, 바위 위치, 꿀 여부, 꿀 높이)
+  // 1) 중심선: 기울기 ≤ (최대 세로 속도 420 ÷ 그때 속도) × 0.55 (smoothstep 최대 기울기 = 1.5 × 변화량 / 200)
+  let c = 300;
+  for (let k = 0; k <= NSEG + 1; k++) {
+    const x = k * SEG, m = x / UNIT_PER_M, g = gapAt(x);
+    if (k >= 3) {
+      let amp = m < 60 ? 40 : m < 200 ? 40 + (m - 60) / 140 * 60 : 100;
+      amp = Math.min(amp, (VMAX / speedAtDist(x)) * 0.55 * SEG / 1.5);
+      c = clamp(c + (RN[k * NR] * 2 - 1) * amp, g / 2 + 30, BAND - 30 - g / 2);
+    }
+    cC[k] = c;
+  }
+  // 2) 장애물과 꿀
+  let prev = false;
+  for (let k = 0; k <= NSEG + 1; k++) {
+    const x = k * SEG, m = x / UNIT_PER_M, r = k * NR;
+    obT[k] = 0; obA[k] = 0; obB[k] = 0; hnY[k] = -1;
+    // 이웃 구간에 연속으로 두지 않아요. 100m 표지판 자리(k % 25 == 0)와 출구 근처도 비워요.
+    const p = m < 60 ? 0 : m < 200 ? 0.1 + (m - 60) / 140 * 0.18 : m < 480 ? 0.28 + (m - 200) / 280 * 0.39 : 0.67;
+    if (!prev && RN[r + 1] < p && k % 25 !== 0 && x <= EXIT_X - 600) {
+      const g = gapAt(x), r3 = RN[r + 2];
+      let type = m >= 300 && r3 < 0.3 ? 3 : (m >= 300 ? (r3 - 0.3) / 0.7 : r3) < 0.5 ? 1 : 2;
+      if (type === 3) {
+        // 떠 있는 바위: 가로 50 × 통로의 28%. 넓은 쪽 통로가 120 이상 남게 둬요.
+        const hR = Math.min(0.28 * g, g - 132);
+        if (hR < 24) type = r3 < 0.15 ? 1 : 2;
+        else {
+          const free = g - hR, small = 12 + RN[r + 3] * Math.max(0, free - 132);
+          const top = cC[k] - g / 2, bot = cC[k] + g / 2;
+          obA[k] = RN[r + 4] < 0.5 ? top + small : bot - small - hR;
+          obB[k] = hR;
+        }
+      }
+      if (type === 1 || type === 2) {
+        // 남는 통로가 120 이상 (기획 115에 여유 5)
+        const intr = (g - 120) * (0.45 + 0.55 * RN[r + 3]);
+        if (intr < 12) type = 0;
+        else { obA[k] = intr; obB[k] = clamp(intr * 0.42, 22, 48); }
+      }
+      obT[k] = type;
+      prev = type !== 0;
+    } else prev = false;
+    // 꿀: 처음엔 통로 한가운데, 200m부터 점점 벽 가까이
+    if (k >= 2 && RN[r + 5] < 0.42 && x + 100 < EXIT_X - 300) {
+      const hx = x + 100, gh = gapAt(hx), ch = centerAt(hx);
+      const spread = m < 60 ? 0 : m < 200 ? (m - 60) / 140 * 0.6 : Math.min(0.95, 0.6 + (m - 200) / 280 * 0.35);
+      hnY[k] = ch + spread * (RN[r + 6] * 2 - 1) * (gh / 2 - 26);
+    }
+  }
+}
+
+function segDist2(px, py, ax, ay, bx, by) {
+  const vx = bx - ax, vy = by - ay, l = vx * vx + vy * vy;
+  let t = l > 0 ? ((px - ax) * vx + (py - ay) * vy) / l : 0;
+  t = clamp(t, 0, 1);
+  const dx = px - (ax + vx * t), dy = py - (ay + vy * t);
+  return dx * dx + dy * dy;
+}
+function inTri(px, py, ax, ay, bx, by, cx, cy) {
+  const d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);
+  const d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy);
+  const d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay);
+  const neg = d1 < 0 || d2 < 0 || d3 < 0, pos = d1 > 0 || d2 > 0 || d3 > 0;
+  return !(neg && pos);
+}
+// 종유석·석순 모양: 그림과 판정이 같이 써요 (판정 삼각형은 늘 그림 안에 있어요)
+// SG = [왼쪽 벽 x, y, 왼쪽 어깨 x, y, 끝 x, y(조절점), 오른쪽 어깨 x, y, 오른쪽 벽 x, y, 판정 끝 x, y]
+const SPIKE_SHOULDER = 0.94;
+const SG = new Float32Array(12);
+function spikeGeom(k) {
+  const x0 = k * SEG, hw = obB[k], up = obT[k] === 1, toRock = up ? -1 : 1;
+  const lx = x0 - hw, rx = x0 + hw;
+  const ly = up ? ceilAt(lx) : floorAt(lx), ry = up ? ceilAt(rx) : floorAt(rx);
+  const ty = up ? ceilAt(x0) + obA[k] : floorAt(x0) - obA[k];
+  const f = SPIKE_SHOULDER;
+  const ax = lx + (x0 - lx) * f, ay = ly + (ty - ly) * f, bx = rx + (x0 - rx) * f, by = ry + (ty - ry) * f;
+  SG[0] = lx; SG[1] = ly; SG[2] = ax; SG[3] = ay; SG[4] = x0; SG[5] = ty; SG[6] = bx; SG[7] = by; SG[8] = rx; SG[9] = ry;
+  // 둥근 끝 곡선(어깨 → 조절점 (x0, ty) → 어깨)의 가운데 점에서 바위 쪽으로 1단위 = 판정 끝
+  SG[10] = 0.25 * ax + 0.5 * x0 + 0.25 * bx;
+  SG[11] = 0.25 * ay + 0.5 * ty + 0.25 * by + toRock;
+}
+const ROCK_W = 50, ROCK_R = 10;
+// 판정 원(반지름 15)이 벽·장애물에 닿았는지. 그림(반지름 22)보다 작아서 너그러워요.
+function hitCave(d, y) {
+  for (let i = -1; i <= 1; i++) {
+    const x = d + i * 11, r = i === 0 ? HIT_R : 10.2;
+    const c = centerAt(x), h = gapAt(x) / 2;
+    if (y - r < c - h || y + r > c + h) return true;
+  }
+  const k = Math.round(d / SEG);
+  if (k < 0 || k > NSEG || !obT[k]) return false;
+  const x0 = k * SEG;
+  if (obT[k] === 3) {
+    // 떠 있는 바위: 그림(둥근 사각형, 모서리 반지름 10)을 2단위 줄인 둥근 사각형
+    const rr = Math.min(ROCK_R, obB[k] / 2), ir = rr - 2;
+    const cx = clamp(d, x0 - ROCK_W / 2 + rr, x0 + ROCK_W / 2 - rr), cy = clamp(y, obA[k] + rr, obA[k] + obB[k] - rr);
+    const lim = HIT_R + ir;
+    return (d - cx) * (d - cx) + (y - cy) * (y - cy) < lim * lim;
+  }
+  if (Math.abs(d - x0) > obB[k] + HIT_R) return false;
+  spikeGeom(k);
+  const lx = SG[0], ly = SG[1], rx = SG[8], ry = SG[9], tx = SG[10], ty = SG[11];
+  if (inTri(d, y, lx, ly, tx, ty, rx, ry)) return true;
+  return segDist2(d, y, lx, ly, tx, ty) < HIT_R * HIT_R || segDist2(d, y, tx, ty, rx, ry) < HIT_R * HIT_R;
+}
+function scoreOf(b) { return Math.floor(b.d / UNIT_PER_M) + b.honey * 5 + (b.exit ? 100 : 0); }
+
+// 꿀벌 하나를 1/60초 진행해요. t는 출발 뒤 지난 시간(초)이에요.
+function stepBee(b, t) {
+  if (b.press) b.everPressed = true;
+  if (!b.everPressed && t < HOVER_T) {
+    // 출발 직후 첫 입력 전까지(최대 1.5초) 제자리에서 둥실둥실
+    const ny = b.y0 + Math.sin(t * 6) * 4;
+    b.vy = (ny - b.y) / STEP; b.y = ny;
+  } else {
+    b.vy += (b.press ? -UP_ACC : DOWN_ACC) * STEP;
+    b.vy = clamp(b.vy, -VMAX, VMAX);
+    b.y += b.vy * STEP;
+  }
+  const d = distAt(t);
+  if (d >= EXIT_X) {
+    b.d = EXIT_X; b.alive = false; b.exit = true; b.score = scoreOf(b);
+    beeEvent(b, "exit", 0);
+    return;
+  }
+  b.d = d;
+  const k = Math.round((d - 100) / SEG);
+  if (k >= 0 && k <= NSEG && hnY[k] >= 0 && !b.taken[k]) {
+    const dx = d - (k * SEG + 100), dy = b.y - hnY[k];
+    if (dx * dx + dy * dy < HONEY_HIT * HONEY_HIT) { b.taken[k] = 1; b.honey++; beeEvent(b, "honey", k); }
+  }
+  b.score = scoreOf(b);
+  if (hitCave(d, b.y)) { b.alive = false; beeEvent(b, "crash", 0); }
+}
+
+// 컴퓨터 꿀벌: 0.1초마다 판단. 앞 140단위의 통로 중심(장애물이 있으면 넓은 쪽)을 따라가요.
+function initBotAI(b, t) {
+  b.thinkT = t; b.wobbleT = t; b.wobble = 0;
+  const r = Math.random();
+  b.mistakeAt = t + (b.skill < 0.6 ? 20 + r * 50 : b.skill > 0.7 ? 45 + r * 85 : 30 + r * 60);
+  b.mistakeMode = Math.random() < 0.5;
+}
+function botThink(b, t) {
+  if (t < b.thinkT) return;
+  b.thinkT = t + 0.1;
+  const d = b.d;
+  let target = centerAt(d + 140);
+  const kA = Math.ceil((d - 30) / SEG);
+  for (let k = Math.max(0, kA); k <= kA + 2 && k <= NSEG; k++) {
+    const x0 = k * SEG;
+    if (x0 - d > 300) break;
+    if (!obT[k]) continue;
+    const g = gapAt(x0), top = cC[k] - g / 2, bot = cC[k] + g / 2;
+    if (obT[k] === 1) target = (top + obA[k] + bot) / 2;
+    else if (obT[k] === 2) target = (top + bot - obA[k]) / 2;
+    else { const rt = obA[k], rb = rt + obB[k]; target = rt - top > bot - rb ? (top + rt) / 2 : (rb + bot) / 2; }
+    break;
+  }
+  if (t >= b.wobbleT) { b.wobbleT = t + 0.5; b.wobble = (Math.random() * 2 - 1) * (1 - b.skill) * gapAt(d) * 0.25; }
+  target += b.wobble;
+  let press = (b.y - target) + b.vy * 0.25 > 0; // 아래에 있거나 빠르게 떨어지는 중이면 눌러요
+  if (t >= b.mistakeAt) {
+    if (t < b.mistakeAt + 0.5) press = b.mistakeMode; // 실수: 0.5초 동안 잘못 누르거나 떼요
+    else { b.mistakeAt = t + 10 + Math.random() * 15; b.mistakeMode = Math.random() < 0.5; }
+  }
+  b.press = press;
+}
+// ---- 동굴·물리 (끝) ----
+
+/* ===== 화면 ===== */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, S = 1, BT = 0, BB = 0;      // S: 세계 1단위가 몇 px인지, BT/BB: 동굴 띠 위·아래 (px)
+let HUD_MARGIN = false, BOARD_W = 190, BOARD_FS = 15, NOTE_Y = 90, NOTE_H = 26, BOTTOM_Y = 0;
+let FRONT_X1 = 0, ROCK_TOP_Y = 0, BOARD_FULL = true, SUMMARY_Y = 60, NOTE_SIDE = false;
+let HINT_X = 0, HINT_Y = 0, HINT_BELOW = false, GUIDE_Y = 0;
+let darkGrad = null, SHX = 0, SHY = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.max(1, Math.round(W * DPR)); canvas.height = Math.max(1, Math.round(H * DPR));
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  S = Math.max(0.05, Math.min(W / 520, H / BAND));
+  BT = (H - BAND * S) / 2; BB = BT + BAND * S;
+  HUD_MARGIN = BT >= 120; // 위 여백이 넉넉하면 점수·순위판을 여백에, 아니면 동굴 위에 반투명으로 겹쳐요
+  BOARD_W = Math.min(190, Math.max(140, W - 160));
+  BOARD_FS = HUD_MARGIN || W >= 500 ? 15 : 14;
+  // HUD가 꿀벌 앞 통로(화면 x BEE_X·S ~ (BEE_X+420)·S)를 가리지 않게 배치해요.
+  // 세계 y 0~29와 571~600은 늘 바위라서 그 위에는 글자를 올려도 돼요.
+  FRONT_X1 = (BEE_X + VIEW_AHEAD) * S;
+  ROCK_TOP_Y = BT + 29 * S;
+  const boardBottom4 = 58 + 12 + (BOARD_FS + 6) * 5;
+  // 순위판 전체: 위 바위 줄 안에 다 들어가거나 꿀벌 앞 구간보다 오른쪽(어둠)에 있을 때만. 아니면 한 줄 요약.
+  BOARD_FULL = boardBottom4 <= ROCK_TOP_Y || W - 10 - BOARD_W >= FRONT_X1;
+  SUMMARY_Y = ROCK_TOP_Y >= 70 ? 60 : 30;
+  // 알림: 넓은 화면은 어둠 쪽(순위판 아래), 좁은 화면은 아래 여백이나 아래 바위 줄
+  NOTE_SIDE = W - FRONT_X1 >= 170;
+  const bottomM = H - BB;
+  NOTE_H = bottomM >= 30 ? 26 : clamp(Math.floor(29 * S) - 1, 17, 24);
+  NOTE_Y = bottomM >= 30 ? BB + Math.min(26, bottomM / 2) : H - NOTE_H / 2 - 1;
+  if (bottomM >= 104) { HINT_X = W / 2; HINT_Y = BB + bottomM / 2 + 8; HINT_BELOW = false; GUIDE_Y = BB + 24; }
+  else if (W >= H) { HINT_X = W - 64; HINT_Y = H - 64; HINT_BELOW = false; GUIDE_Y = H - 30; }
+  else { HINT_X = W / 2; HINT_Y = H - 54; HINT_BELOW = true; GUIDE_Y = H - 54 - 45 - 20; }
+  BOTTOM_Y = bottomM >= 104 ? BB + 34 : H - 40;
+  // 꿀벌 앞 420단위부터 80단위 사이에 거의 깜깜(0.92)해져요. 화면이 넓어도 앞을 더 멀리 보지 못해요.
+  const dx = FRONT_X1;
+  darkGrad = ctx.createLinearGradient(dx, 0, dx + 80 * S, 0);
+  darkGrad.addColorStop(0, "rgba(10,5,20,0)");
+  darkGrad.addColorStop(1, "rgba(10,5,20,0.92)");
+}
+window.addEventListener("resize", resize);
+resize();
+const sx = (x) => SHX + (BEE_X + x - camD) * S;
+const sy = (y) => SHY + BT + y * S;
+
+// 바위 무늬·그라디언트는 한 번만 만들어요 (세계 좌표 기준이라 화면 크기와 상관없어요)
+const rockPat = (() => {
+  const c = document.createElement("canvas"); c.width = c.height = 128;
+  const g = c.getContext("2d");
+  g.fillStyle = "#6b4a2f"; g.fillRect(0, 0, 128, 128);
+  const dots = [[14, 18, 5], [42, 9, 3], [70, 32, 6], [102, 15, 4], [22, 62, 4], [56, 74, 7], [94, 58, 4], [116, 90, 5], [30, 104, 6], [78, 110, 4], [104, 118, 3], [9, 90, 3]];
+  g.fillStyle = "#573b25";
+  for (const p of dots) { g.beginPath(); g.arc(p[0], p[1], p[2], 0, TAU); g.fill(); }
+  g.fillStyle = "rgba(154,107,64,0.35)";
+  for (const p of dots) { g.beginPath(); g.arc(p[0] + 9, p[1] - 7, 1.6, 0, TAU); g.fill(); }
+  return ctx.createPattern(c, "repeat");
+})();
+const passGrad = ctx.createLinearGradient(0, 0, 0, BAND);
+passGrad.addColorStop(0, "#2a1f3d"); passGrad.addColorStop(1, "#1d1530");
+const exitGrad = ctx.createLinearGradient(EXIT_X - 320, 0, EXIT_X, 0);
+exitGrad.addColorStop(0, "rgba(255,246,214,0)"); exitGrad.addColorStop(1, "rgba(255,246,214,1)");
+// 배경 수정 (0.3배 속도로 흘러요): [기준 x, 띠 안 높이, 크기]
+const CRYSTALS = [[40, 170, 26], [190, 420, 34], [330, 240, 20], [470, 380, 30], [610, 200, 24], [760, 450, 36], [900, 300, 22], [1040, 160, 28]];
+const PTS = 420, PX = new Float32Array(PTS), PCe = new Float32Array(PTS), PFl = new Float32Array(PTS);
+
+/* ===== 소리 (Web Audio, 첫 입력 뒤에 켜져요) ===== */
+let audio = null, muted = false, buzz = null;
+function tone(freq, dur, type, vol, when, freq2) {
+  if (!audio || muted) return;
+  const t = audio.currentTime + (when || 0), o = audio.createOscillator(), g = audio.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  if (freq2) o.frequency.exponentialRampToValueAtTime(freq2, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol || 0.06, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(audio.destination); o.start(t); o.stop(t + dur + 0.03);
+}
+function unlockAudio() {
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audio = null; } }
+  if (audio && audio.state === "suspended") audio.resume();
+  if (audio && !buzz) {
+    // 날갯짓 "붕~": 톱니파 140Hz → 저역통과 600Hz → 볼륨 (누르는 동안만 0.04)
+    try {
+      const o = audio.createOscillator(), f = audio.createBiquadFilter(), g = audio.createGain();
+      o.type = "sawtooth"; o.frequency.value = 140; f.type = "lowpass"; f.frequency.value = 600; g.gain.value = 0;
+      o.connect(f); f.connect(g); g.connect(audio.destination); o.start();
+      buzz = { o, g, on: false, at: 0 };
+    } catch (e) { buzz = null; }
+  }
+}
+const sfx = {
+  honey: () => { tone(880, 0.09, "triangle", 0.07); tone(1320, 0.16, "triangle", 0.07, 0.07); },
+  sign: () => { tone(988, 0.2, "sine", 0.07); tone(784, 0.32, "sine", 0.07, 0.17); },
+  crash: () => tone(120, 0.25, "square", 0.09, 0, 60),
+  other: () => tone(220, 0.12, "triangle", 0.04, 0, 110),
+  tick: () => tone(440, 0.14, "square", 0.05),
+  go: () => tone(880, 0.3, "square", 0.06),
+  pop: () => tone(600, 0.12, "sine", 0.08, 0, 1400),
+  exit: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.16, "triangle", 0.07, i * 0.1)),
+  win: () => [784, 988, 1175].forEach((f, i) => tone(f, 0.14, "triangle", 0.06, 0.25 + i * 0.09)),
+  join: () => tone(740, 0.08, "sine", 0.05),
+};
+function updateBuzz(t) {
+  if (!buzz || !audio) return;
+  const me = G.me;
+  const on = !muted && G.phase === "play" && !!me && me.alive && me.press;
+  if (on !== buzz.on) { buzz.on = on; buzz.g.gain.setTargetAtTime(on ? 0.04 : 0, audio.currentTime, 0.03); }
+  if (on && t - buzz.at > 60) { buzz.at = t; buzz.o.frequency.setTargetAtTime(140 + Math.max(0, -me.vy) / VMAX * 45, audio.currentTime, 0.05); }
+}
+const muteBtn = document.getElementById("mute");
+muteBtn.addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+  muted = !muted;
+  muteBtn.textContent = muted ? "🔇" : "🔊";
+  muteBtn.setAttribute("aria-label", muted ? "소리 켜기" : "소리 끄기");
+});
+
+/* ===== 멀티 연결 ===== */
+const MP = GameSDK.multi;
+let online = false, joinState = "pending";   // pending | ok | fail
+let myId = "me", myName = "나";
+let humans = [{ id: "me", name: "나" }];      // 방에 있는 사람 (이름은 SDK 닉네임만 써요)
+let hostId = "me";
+const nameCache = {};
+const isHost = () => hostId === myId;
+function cleanName(n) { return String(n == null ? "" : n).replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 12) || "플레이어"; }
+
+GameSDK.multi.join().then((room) => {
+  online = true; joinState = "ok";
+  const oldId = myId;
+  myId = String(room.me && room.me.id != null ? room.me.id : "me").slice(0, 64);
+  myName = cleanName(room.me && room.me.name);
+  // 연결 전에 혼자 판을 시작했다면 내 꿀벌의 id만 옮겨요
+  for (const b of G.roster) if (b.id === oldId) { b.id = myId; b.isMe = true; b.name = myName; }
+  if (hostId === oldId) hostId = myId;
+  applyPlayers(room.players, room.hostId);
+  if (!isHost()) G.n = -1; // 이미 있는 방이면 방장의 판을 그대로 받아요 (다음 상태를 새 판으로 받아들여요)
+}).catch(() => { joinState = "fail"; online = false; });
+
+MP.on("players", (players, host) => { if (online) applyPlayers(players, host); });
+MP.on("message", (data, from) => onNet(data, from));
+MP.on("emote", (key, from) => {
+  const icon = EMOTE_ICONS[key];
+  if (!icon) return;
+  const id = String(from), b = beeById(id);
+  if (b) { b.emote = icon; b.emoteUntil = now() + 2500; }
+  else if (nameCache[id]) notify(`${nameCache[id]} ${icon}`);
+});
+
+function applyPlayers(players, host) {
+  const before = humans.length;
+  const list = [];
+  if (Array.isArray(players)) {
+    for (const p of players) {
+      if (!p || p.id == null) continue;
+      const id = String(p.id).slice(0, 64), name = cleanName(p.name);
+      nameCache[id] = name;
+      list.push({ id, name });
+      if (list.length >= 8) break;
+    }
+  }
+  if (!list.some((h) => h.id === myId)) list.unshift({ id: myId, name: myName });
+  humans = list;
+  const wasHost = isHost();
+  hostId = host != null ? String(host) : myId;
+  if (humans.length > before && before > 0) sfx.join();
+  for (const b of G.roster) if (!b.bot && !b.isMe && nameCache[b.id]) b.name = nameCache[b.id];
+  if (!wasHost && isHost()) takeOver();
+  // 판 도중에 나간 사람 자리는 "대신하는 컴퓨터"가 이어받아요
+  if (isHost() && (G.phase === "count" || G.phase === "play")) {
+    for (const b of G.roster) if (!b.bot && !b.isMe && b.alive && !humans.some((h) => h.id === b.id)) toBot(b);
+  }
+}
+
+/* ===== 게임 상태 ===== */
+const PH_ORDER = { count: 1, play: 2, result: 3, lobby: 4 };
+const G = {
+  phase: "lobby", n: 0, seed: 20261112, startAt: 0, phaseEnd: 0, lobbySince: now(), clockN: -1,
+  roster: [], me: null, lastSent: -1e9, dirty: false, resultAt: 0,
+};
+let simT = 0, camD = 0, camOff = 0, camKey = "start";
+let submitted = true, best = 0, ignoreUntil = 0, goAt = -1e9, countNum = 0, rankPrev = -1, rankBeepAt = 0;
+let shakeT = 0;
+buildCave(G.seed);
+
+function botName(id) { return /^bot[1-3]$/.test(id) ? BOT_NAMES[+id[3] - 1] : "대신하는 컴퓨터"; }
+function makeBee(id, bot, idx) {
+  const y0 = 300 + (idx - 1.5) * 30;
+  return {
+    id, bot, idx, skill: 0.6, isMe: id === myId, color: ME_COLOR,
+    name: bot ? botName(id) : id === myId ? myName : nameCache[id] || "플레이어",
+    y0, d: 0, y: y0, vy: 0, press: false, everPressed: false,
+    alive: true, exit: false, honey: 0, score: 0, taken: new Uint8Array(NSEG + 2),
+    nD: 0, nY: y0, nAt: now(), nSc: 0,
+    dispD: 0, dispY: y0, dispVy: 0, tilt: 0, flap: Math.random() * 6,
+    deadAt: 0, deadD: 0, fallY: 0, fallVy: 0, exitAt: 0,
+    fD: 0, fSc: 0, fE: 0, hasFinal: false, flying: false,
+    thinkT: 0, wobble: 0, wobbleT: 0, mistakeAt: 1e9, mistakeMode: false,
+    emote: "", emoteUntil: 0, rk: 0, rkD: 0,
+  };
+}
+function setRoster(list) {
+  G.roster = list;
+  G.me = null;
+  let j = 0;
+  for (let i = 0; i < list.length; i++) {
+    const b = list[i];
+    b.isMe = b.id === myId;
+    if (b.isMe) { G.me = b; b.color = ME_COLOR; b.name = myName; } else b.color = OTHER_COLORS[j++ % OTHER_COLORS.length];
+  }
+}
+function beeById(id) { for (const b of G.roster) if (b.id === id) return b; return null; }
+const localSim = (b) => b.isMe || (b.bot && isHost());
+const lobbyWait = () => (humans.length >= 2 ? 5000 : 10000);
+
+/* ----- 방장만: 판 진행 ----- */
+function setPhase(ph) { G.phase = ph; G.dirty = true; enterPhase(ph); }
+function startCountdown() {
+  const t = now();
+  G.n++;
+  G.seed = (Math.random() * 4294967296) >>> 0;
+  buildCave(G.seed);
+  const list = [];
+  for (let i = 0; i < humans.length && list.length < 4; i++) list.push(makeBee(humans[i].id, false, list.length));
+  const nb = Math.max(0, 3 - list.length); // 3명이 안 되면 컴퓨터로 채워요
+  for (let j = 0; j < nb; j++) {
+    const b = makeBee("bot" + (j + 1), true, list.length);
+    b.skill = nb === 1 ? 0.65 : j === 0 ? 0.55 : 0.75;
+    initBotAI(b, 0);
+    list.push(b);
+  }
+  setRoster(list);
+  G.startAt = t + COUNT_MS; G.clockN = G.n; simT = 0;
+  setPhase("count");
+  MP.lock(true);
+}
+function toBot(b) {
+  b.bot = true; b.name = "대신하는 컴퓨터"; b.skill = 0.6;
+  b.d = Math.max(b.d, b.nD); b.y = clamp(b.dispY || b.nY || b.y0, 0, BAND); b.vy = 0; b.press = false;
+  b.everPressed = G.phase === "play";
+  b.honey = Math.max(0, Math.round((b.score - Math.floor(b.d / UNIT_PER_M)) / 5));
+  for (let k = 0; k <= NSEG; k++) if (k * SEG + 100 < b.d + 30) b.taken[k] = 1;
+  initBotAI(b, simT);
+  G.dirty = true;
+}
+function takeOver() {
+  // 방장이 바뀌었어요: 마지막으로 받은 상태(시드·판 번호·명단·컴퓨터 위치)로 이어서 진행해요
+  const t = now();
+  G.lastSent = -1e9; G.dirty = true;
+  if (G.phase === "lobby") { G.lobbySince = t; return; }
+  if (G.phase === "play") { const tt = (t - G.startAt) / 1000; if (tt > simT) simT = Math.floor(tt / STEP) * STEP; }
+  for (const b of G.roster) {
+    if (b.bot && b.alive) {
+      b.d = Math.max(b.d, b.nD); b.y = clamp(b.dispY || b.nY || b.y0, 0, BAND); b.vy = 0;
+      b.everPressed = G.phase === "play";
+      b.honey = Math.max(0, Math.round((b.score - Math.floor(b.d / UNIT_PER_M)) / 5));
+      for (let k = 0; k <= NSEG; k++) if (k * SEG + 100 < b.d + 30) b.taken[k] = 1;
+      initBotAI(b, simT);
+    } else if (!b.bot && !b.isMe) b.nAt = t;
+  }
+  if (G.phase === "count" || G.phase === "play") MP.lock(true);
+}
+function hostUpdate(t) {
+  if (G.phase === "lobby") {
+    // join이 실패한 혼자 모드에서는 자동 시작하지 않고 탭을 기다려요
+    if (joinState === "ok" && t - G.lobbySince >= lobbyWait()) startCountdown();
+  } else if (G.phase === "count") {
+    if (t >= G.startAt) setPhase("play");
+  } else if (G.phase === "play") {
+    let allDone = true;
+    for (const b of G.roster) {
+      if (b.bot || !b.alive) continue;
+      if (!b.isMe && t - b.nAt > TIMEOUT_MS) { // 3초 동안 소식이 없으면 마지막 거리에서 떨어진 것으로 처리
+        b.d = b.nD; b.score = b.nSc; b.y = b.nY; b.alive = false;
+        beeEvent(b, "crash", 0);
+        continue;
+      }
+      allDone = false;
+    }
+    if (allDone || t - G.startAt > EXIT_T_MS + 8000) {
+      G.phaseEnd = t + RESULT_MS;
+      setPhase("result");
+      MP.lock(false);
+    }
+  } else if (G.phase === "result") {
+    if (joinState === "ok" && t >= G.phaseEnd) setPhase("lobby");
+  }
+}
+function buildState(t) {
+  const r = [], b = [], f = [];
+  for (const e of G.roster) {
+    r.push([e.id, e.bot ? 1 : 0]);
+    if (e.bot) b.push([Math.round(e.d), Math.round(e.y), e.alive ? 1 : 0, e.score]);
+    if (e.alive && G.phase !== "result") f.push(0);
+    else f.push([Math.round(e.hasFinal ? e.fD : e.d), e.hasFinal ? e.fSc : e.score, e.exit ? 1 : 0]);
+  }
+  const me = G.me;
+  const end = G.phase === "count" ? G.startAt : G.phase === "lobby" ? G.lobbySince + lobbyWait() : G.phaseEnd;
+  return {
+    t: "s", n: G.n, ph: G.phase,
+    tl: Math.max(0, Math.round(end - t)),
+    el: G.phase === "play" ? Math.max(0, Math.round(t - G.startAt)) : 0,
+    seed: G.seed, r,
+    h: me ? [Math.round(me.d), Math.round(me.y), me.alive ? 1 : 0, me.score] : 0,
+    b, f,
+  };
+}
+
+/* ----- 보내기 (게임 안 자체 제한: 1초에 7개까지. 넘치면 버려요) ----- */
+const sendTimes = [-1e9, -1e9, -1e9, -1e9, -1e9, -1e9, -1e9];
+let sendIdx = 0;
+function sendLimited(msg) {
+  if (!online) return false;
+  const t = now();
+  if (t - sendTimes[sendIdx] < 1000) return false;
+  sendTimes[sendIdx] = t; sendIdx = (sendIdx + 1) % sendTimes.length;
+  MP.send(msg);
+  return true;
+}
+let lastP = -1e9, pNow = false, lastGo = -1e9;
+function netSend(t) {
+  if (!online) return;
+  if (isHost()) {
+    if (humans.length < 2) return; // 혼자면 보낼 필요가 없어요
+    const iv = G.phase === "count" || G.phase === "play" ? 167 : 500;
+    if ((G.dirty && t - G.lastSent >= 120) || t - G.lastSent >= iv) {
+      if (sendLimited(buildState(t))) { G.lastSent = t; G.dirty = false; }
+    }
+    return;
+  }
+  const me = G.me;
+  let iv = 1000;
+  if ((G.phase === "count" || G.phase === "play") && me) iv = me.alive ? 167 : 500;
+  if ((pNow && t - lastP >= 120) || t - lastP >= iv) {
+    const msg = me && G.phase !== "lobby"
+      ? { t: "p", n: G.n, d: Math.round(me.d), y: Math.round(me.y), a: me.alive && G.phase !== "result" ? 1 : 0, s: me.score, e: me.exit ? 1 : 0 }
+      : { t: "p", n: G.n, d: 0, y: 0, a: 0, s: 0, e: 0 };
+    if (sendLimited(msg)) { lastP = t; pNow = false; }
+  }
+}
+
+/* ----- 받기 ----- */
+function onNet(data, from) {
+  if (!data || typeof data !== "object") return;
+  from = String(from);
+  if (data.t === "p") {
+    const b = beeById(from);
+    if (b && !b.bot && !b.isMe && (data.n | 0) === G.n && (G.phase === "count" || G.phase === "play")) {
+      b.nD = clamp(+data.d || 0, 0, EXIT_X); b.nY = clamp(+data.y || 0, 0, BAND);
+      b.nSc = clamp(data.s | 0, 0, 99999); b.nAt = now();
+      if (b.alive) {
+        b.d = b.nD; b.score = b.nSc; netHoney(b);
+        if (G.phase === "play" && (data.a === 0 || data.e === 1)) {
+          b.alive = false; b.exit = data.e === 1; b.y = b.nY;
+          beeEvent(b, b.exit ? "exit" : "crash", 0);
+        }
+      }
+    }
+    if (isHost() && data.go === 1 && G.phase === "lobby" && humans.some((h) => h.id === from)) startCountdown();
+  } else if (data.t === "s" && from === hostId && !isHost()) {
+    applyState(data);
+  }
+}
+function applyState(m) {
+  const t = now();
+  const n = clamp(m.n | 0, 0, 1e9);
+  const ph = PH_ORDER[m.ph] ? m.ph : "lobby";
+  if (n === G.n && PH_ORDER[ph] < PH_ORDER[G.phase]) return; // 내가 먼저 넘어간 단계 (예: 출발)
+  const newRound = n !== G.n, prev = G.phase;
+  G.n = n;
+  if (ph !== "lobby") {
+    const sd = (+m.seed) >>> 0;
+    if (sd !== G.seed) { G.seed = sd; buildCave(sd); }
+  }
+  // 시계 맞추기: 그 판의 첫 상태에서 한 번, 그 뒤로는 500ms 넘게 어긋날 때만 고쳐요
+  if (ph === "count" || ph === "play") {
+    const st = ph === "count" ? t + clamp(+m.tl || 0, 0, COUNT_MS + 500) : t - clamp(+m.el || 0, 0, EXIT_T_MS + 20000);
+    if (G.clockN !== n || Math.abs(st - G.startAt) > 500) { G.startAt = st; G.clockN = n; }
+  } else G.phaseEnd = t + clamp(+m.tl || 0, 0, 20000);
+  if (Array.isArray(m.r)) syncRoster(m.r, newRound);
+  G.phase = ph;
+  const hb = beeById(hostId);
+  if (hb && Array.isArray(m.h)) netBee(hb, m.h, t, ph);
+  if (Array.isArray(m.b)) {
+    let j = 0;
+    for (const b of G.roster) if (b.bot) { const e = m.b[j++]; if (Array.isArray(e)) netBee(b, e, t, ph); }
+  }
+  if (Array.isArray(m.f)) {
+    for (let i = 0; i < G.roster.length; i++) {
+      const b = G.roster[i], e = m.f[i];
+      if (b.isMe || !Array.isArray(e)) continue;
+      b.fD = clamp(+e[0] || 0, 0, EXIT_X); b.fSc = clamp(e[1] | 0, 0, 99999); b.fE = e[2] ? 1 : 0; b.hasFinal = true;
+    }
+  }
+  if (newRound && (ph === "play" || ph === "result")) enterPhase("count"); // 카운트다운을 놓쳤어도 판 준비는 해요
+  if (newRound || prev !== ph) enterPhase(ph);
+}
+function netBee(b, e, t, ph) {
+  if (b.isMe) return;
+  b.nD = clamp(+e[0] || 0, 0, EXIT_X); b.nY = clamp(+e[1] || 0, 0, BAND); b.nSc = clamp(e[3] | 0, 0, 99999); b.nAt = t;
+  if (!b.alive) return;
+  b.d = b.nD; b.score = b.nSc; netHoney(b);
+  if (!e[2] && (ph === "play" || ph === "result")) {
+    b.alive = false; b.exit = b.nD >= EXIT_X - 1; b.y = b.nY;
+    if (ph === "play") beeEvent(b, b.exit ? "exit" : "crash", 0);
+    else { b.deadAt = t; b.deadD = b.d; b.fallY = b.dispY; b.exitAt = t; }
+  }
+}
+function syncRoster(r, newRound) {
+  const len = Math.min(4, r.length);
+  let same = !newRound && len === G.roster.length;
+  for (let i = 0; same && i < len; i++) if (!Array.isArray(r[i]) || String(r[i][0]).slice(0, 64) !== G.roster[i].id) same = false;
+  if (!same) {
+    const list = [];
+    for (let i = 0; i < len; i++) {
+      const e = r[i];
+      if (!Array.isArray(e)) continue;
+      const id = String(e[0]).slice(0, 64);
+      const old = newRound ? null : beeById(id);
+      list.push(old || makeBee(id, !!e[1], list.length));
+    }
+    setRoster(list);
+  }
+  for (let i = 0; i < G.roster.length; i++) {
+    const e = r[i], b = G.roster[i];
+    if (Array.isArray(e) && e[1] && !b.bot && !b.isMe) { b.bot = true; b.name = botName(b.id); }
+  }
+}
+
+/* ----- 모두: 단계가 바뀔 때 ----- */
+function enterPhase(ph) {
+  const t = now();
+  if (ph === "count") {
+    simT = 0; camD = 0; camOff = 0; camKey = "start"; countNum = 0; rankPrev = -1; shakeT = 0;
+    for (const p of parts) p.on = false;
+    for (const p of pops) p.on = false;
+    for (const nn of notes) nn.until = 0;
+    if (G.me) { GameSDK.newRound(); submitted = false; } // 구경만 하는 판은 점수를 보내지 않아요
+  } else if (ph === "play") {
+    goAt = t; sfx.go();
+  } else if (ph === "result") {
+    G.resultAt = t;
+    for (const b of G.roster) {
+      if (!b.hasFinal || b.isMe) { b.fD = b.d; b.fSc = b.score; b.fE = b.exit ? 1 : 0; b.hasFinal = true; }
+      b.flying = b.alive;
+    }
+    const me = G.me;
+    if (me && !submitted) { submitted = true; GameSDK.submitScore(me.score); best = Math.max(best, me.score); }
+    updateRanking();
+    if (me && rankArr[0] === me) sfx.win();
+  } else if (ph === "lobby") {
+    G.lobbySince = t;
+  }
+}
+
+/* ----- 꿀벌에게 일어난 일 (꿀, 쿵, 완주) ----- */
+function beeEvent(b, kind, k) {
+  const t = now();
+  if (kind === "honey") {
+    if (b.isMe) {
+      sfx.honey();
+      const hx = k * SEG + 100, hy = hnY[k];
+      for (let i = 0; i < 8; i++) { const a = i / 8 * TAU; spawn(1, hx, hy, Math.cos(a) * 140 + speedNow() * 0.6, Math.sin(a) * 140, 0.5, 4, "#ffd75e"); }
+      popup(b.d + 42, b.y + (b.y < 200 ? 24 : -26), "+5", "#ffd23f", 20, true);
+    }
+    return;
+  }
+  b.deadAt = t; b.exitAt = t; b.deadD = b.d;
+  b.fallY = localSim(b) ? b.y : b.dispY; b.fallVy = kind === "crash" ? -170 : 0;
+  if (isHost()) G.dirty = true;
+  if (b.isMe) {
+    if (kind === "exit") {
+      sfx.exit();
+      for (let i = 0; i < 30; i++) spawn(3, b.d, b.y, (Math.random() * 2 - 1) * 260 + 300, -Math.random() * 380, 1.4, 5, OTHER_COLORS[i % 4]);
+      popup(b.d + 20, 300, "완주! +100", "#ffd23f", 26);
+    } else {
+      sfx.crash(); shakeT = 0.3;
+      for (let i = 0; i < 10; i++) { const a = Math.random() * TAU, v = 160 + Math.random() * 200; spawn(2, b.d, b.y, Math.cos(a) * v, Math.sin(a) * v - 120, 0.9, 7, "#ffe066"); }
+      popup(b.d + 36, b.y + (b.y < 300 ? 48 : -48), "쿵!", "#ffffff", 26);
+    }
+    if (!submitted) { submitted = true; GameSDK.submitScore(b.score); } // 떨어지거나 출구에 닿는 순간 한 번
+    best = Math.max(best, b.score);
+    ignoreUntil = t + 1000; // 떨어진 뒤 1초 동안 입력 무시
+    pNow = true;
+  } else if (G.phase === "play") {
+    notify(kind === "exit" ? `${b.name} 완주!` : `${b.name} 쿵!`);
+    if (kind === "crash") {
+      sfx.other();
+      for (let i = 0; i < 5; i++) { const a = Math.random() * TAU; spawn(2, b.deadD, b.fallY, Math.cos(a) * 160, Math.sin(a) * 160 - 100, 0.7, 5, "#ffe066"); }
+    }
+  }
+}
+
+/* ===== 입력 (스페이스·↑·W·Enter·마우스 왼쪽·터치, 하나라도 누르고 있으면 올라가요) ===== */
+const keysDown = new Set();
+const pointers = new Set();
+const PRESS_CODES = new Set(["Space", "ArrowUp", "KeyW", "Enter", "NumpadEnter"]);
+window.addEventListener("keydown", (e) => {
+  const code = e.code || e.key;
+  const isPress = PRESS_CODES.has(code) || e.key === " " || e.key === "w" || e.key === "W";
+  if (isPress || code.startsWith("Arrow")) e.preventDefault();
+  if (!isPress) return;
+  if (!e.repeat && !keysDown.has(code)) onTap();
+  keysDown.add(code);
+});
+window.addEventListener("keyup", (e) => { keysDown.delete(e.code || e.key); });
+canvas.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  pointers.add(e.pointerId);
+  onTap();
+});
+window.addEventListener("pointerup", (e) => pointers.delete(e.pointerId));
+window.addEventListener("pointercancel", (e) => pointers.delete(e.pointerId));
+window.addEventListener("contextmenu", (e) => e.preventDefault());
+window.addEventListener("blur", () => { keysDown.clear(); pointers.clear(); });
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) return;
+  keysDown.clear(); pointers.clear();
+  // 탭이 뒤로 가면 그 자리에서 떨어진 것으로 처리해요
+  const me = G.me;
+  if (me && me.alive && G.phase === "play") { me.alive = false; beeEvent(me, "crash", 0); }
+});
+const pressed = () => keysDown.size > 0 || pointers.size > 0;
+
+function onTap() {
+  unlockAudio();
+  const t = now();
+  if (t < ignoreUntil) return;
+  if (G.phase === "lobby") {
+    if (isHost()) startCountdown();
+    else if (t - lastGo > 500) { if (sendLimited({ t: "p", n: G.n, go: 1, d: 0, y: 0, a: 0, s: 0, e: 0 })) lastGo = t; }
+  } else if (G.phase === "result" && humans.length < 2 && isHost() && t - G.resultAt > 1000) {
+    startCountdown(); // 혼자 모드: 바로 다시 하기
+  }
+}
+
+/* ===== 효과 (개수 제한, 미리 만들어 둔 것 재사용) ===== */
+const PMAX = 150, parts = [];
+for (let i = 0; i < PMAX; i++) parts.push({ on: false, kind: 0, x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, size: 3, color: "#fff", rot: 0 });
+let pCursor = 0, windCount = 0, windAcc = 0;
+function spawn(kind, x, y, vx, vy, life, size, color) {
+  for (let n = 0; n < PMAX; n++) {
+    const p = parts[pCursor];
+    pCursor = (pCursor + 1) % PMAX;
+    if (p.on) continue;
+    p.on = true; p.kind = kind; p.x = x; p.y = y; p.vx = vx; p.vy = vy; p.life = life; p.max = life; p.size = size; p.color = color; p.rot = Math.random() * TAU;
+    if (kind === 0) windCount++;
+    return p;
+  }
+  return null;
+}
+const pops = [];
+for (let i = 0; i < 10; i++) pops.push({ on: false, x: 0, y: 0, text: "", life: 0, color: "#fff", size: 18, follow: false });
+function popup(x, y, text, color, size, follow) {
+  for (const p of pops) if (!p.on) { p.on = true; p.x = x; p.y = y; p.text = text; p.life = 0.9; p.color = color; p.size = size; p.follow = !!follow; return; }
+}
+const notes = [{ text: "", until: 0 }, { text: "", until: 0 }, { text: "", until: 0 }];
+function notify(text) {
+  let s = notes[0];
+  for (const nn of notes) if (nn.until < s.until) s = nn;
+  // 좁은 화면에서 처음 3초 안내가 떠 있으면 그 뒤에 1.5초 보여줘요
+  const guideEnd = !NOTE_SIDE && G.me && (G.phase === "count" || G.phase === "play") ? G.startAt + 3000 : 0;
+  s.text = text; s.until = Math.max(now(), guideEnd) + 1500;
+}
+function speedNow() { return G.phase === "play" ? speedAtDist(distAt(simT)) : 0; }
+
+/* ===== 업데이트 ===== */
+const rankArr = [];
+let rankFinal = false, liveD = 0;
+function rankCmp(a, b) {
+  if (b.rk !== a.rk) return b.rk - a.rk;
+  if (Math.abs(b.rkD - a.rkD) > 0.5) return b.rkD - a.rkD;
+  const fa = rankFinal ? a.flying : a.alive, fb = rankFinal ? b.flying : b.alive; // 같으면 아직 날던 꿀벌이 앞
+  if (fa !== fb) return fa ? -1 : 1;
+  return a.idx - b.idx;
+}
+function updateRanking() {
+  rankFinal = G.phase === "result";
+  // 날고 있는 꿀벌은 모두 같은 거리(출발 뒤 지난 시간으로 정해져요)라서 네트워크 지연 없이 비교해요
+  liveD = G.phase === "play" ? Math.min(EXIT_X, distAt(Math.max(0, (now() - G.startAt) / 1000))) : 0;
+  rankArr.length = 0;
+  for (const b of G.roster) {
+    const live = !rankFinal && b.alive && G.phase === "play";
+    b.rkD = rankFinal ? b.fD : live ? liveD : b.d;
+    b.rk = rankFinal ? b.fSc : live ? Math.floor(liveD / UNIT_PER_M) + b.honey * 5 : b.score;
+    rankArr.push(b);
+  }
+  rankArr.sort(rankCmp);
+}
+function netHoney(b) { b.honey = Math.max(0, Math.round((b.nSc - Math.floor(b.nD / UNIT_PER_M) - (b.nD >= EXIT_X ? 100 : 0)) / 5)); }
+
+function simulate(t) {
+  if (G.phase !== "play") return;
+  const target = (t - G.startAt) / 1000;
+  if (target - simT > 2) simT = Math.floor((target - 2) / STEP) * STEP; // 너무 오래 멈췄으면 2초까지만 따라잡아요
+  const me = G.me, host = isHost();
+  if (me && me.alive) me.press = pressed();
+  let steps = 0;
+  // 프레임이 끊겨도 1/60초씩 나눠 진행해서 벽을 뚫지 않아요
+  while (simT + STEP <= target && steps < 150) {
+    simT += STEP; steps++;
+    if (me && me.alive) stepBee(me, simT);
+    if (host) {
+      for (let i = 0; i < G.roster.length; i++) {
+        const b = G.roster[i];
+        if (b.bot && b.alive) { botThink(b, simT); stepBee(b, simT); }
+      }
+    }
+  }
+}
+
+function updateBees(dt, t) {
+  for (const b of G.roster) {
+    let pressing = false;
+    if (G.phase === "lobby" || G.phase === "count") {
+      b.dispD = 0; b.dispY = b.y0 + Math.sin(t / 260 + b.idx * 1.7) * 4; b.dispVy = 0; pressing = true;
+    } else if (b.alive && G.phase === "result") {
+      // 판이 끝났을 때 아직 날던 꿀벌은 그대로 앞으로 날아가요 (순위는 끝난 순간 거리로)
+      b.dispD = b.fD + (t - G.resultAt) / 1000 * speedAtDist(b.fD); b.dispVy = 0; pressing = true;
+    } else if (b.alive) {
+      if (localSim(b)) { b.dispD = b.d; b.dispY = b.y; b.dispVy = b.vy; pressing = b.press; }
+      else {
+        // 받은 위치 사이를 이어 그려요: x는 마지막 거리 + 속도 × 지난 시간, y는 부드럽게 따라가요
+        const ext = clamp((t - b.nAt) / 1000, 0, 1.5), v = speedAtDist(b.nD);
+        const td = Math.min(EXIT_X, b.nD + v * ext);
+        const pred = b.dispD + (ext < 1.5 ? v * dt : 0); // 속도만큼 먼저 움직이고 남은 차이만 부드럽게 맞춰요
+        b.dispD = Math.abs(td - pred) > 300 ? td : pred + (td - pred) * Math.min(1, dt * 8);
+        const py = b.dispY;
+        b.dispY += (b.nY - b.dispY) * Math.min(1, dt * 12);
+        b.dispVy += ((b.dispY - py) / Math.max(dt, 0.001) - b.dispVy) * Math.min(1, dt * 8);
+        pressing = b.dispVy < -60;
+      }
+    } else if (b.exit) {
+      b.dispD = EXIT_X + (t - b.exitAt) * 0.4; b.dispY += (300 - b.dispY) * Math.min(1, dt * 2); pressing = true;
+    } else {
+      // 떨어진 꿀벌: 머리 위에 별을 달고 바닥까지 떨어져요
+      b.dispD = b.deadD;
+      const fl = floorAt(b.deadD) - 13;
+      if (b.fallY < fl) { b.fallVy += 1400 * dt; b.fallY = Math.min(fl, b.fallY + b.fallVy * dt); } else { b.fallY = fl; b.fallVy = 0; }
+      b.dispY = b.fallY;
+    }
+    if (b.alive || b.exit) b.tilt = clamp(b.dispVy / VMAX, -1, 1) * 0.35;
+    else b.tilt += (0.6 - b.tilt) * Math.min(1, dt * 6);
+    b.flap += dt * (pressing ? 42 : 15);
+  }
+}
+function leader() {
+  let best = null;
+  for (const b of G.roster) if (b.alive && !b.isMe && (!best || b.dispD > best.dispD)) best = b;
+  return best;
+}
+function updateCamera(dt, t) {
+  let target = 0, key = "start";
+  if (G.phase === "play" || G.phase === "result") {
+    const me = G.me;
+    if (me && me.alive) { target = me.dispD; key = "me"; }
+    else if (me && (G.phase === "result" || t - me.deadAt < 1300)) { target = me.deadD; key = "medead"; }
+    else if (G.phase === "play") {
+      const lead = leader(); // 구경: 가장 멀리 날고 있는 꿀벌을 따라가요
+      if (lead) { target = lead.dispD; key = lead.id; } else { target = camD; key = "stay"; }
+    } else { target = camD; key = "stay"; }
+  }
+  if (key !== camKey) { camOff = camD - target; camKey = key; }
+  camOff *= Math.exp(-dt * 4);
+  if (Math.abs(camOff) < 0.5) camOff = 0;
+  camD = target + camOff;
+}
+
+function update(dt, t) {
+  if (isHost()) hostUpdate(t);
+  else if (G.phase === "count" && t >= G.startAt && G.clockN === G.n) { G.phase = "play"; enterPhase("play"); }
+  if (G.phase === "count") {
+    const num = Math.ceil((G.startAt - t) / 1000);
+    if (num !== countNum && num >= 1 && num <= 3) { countNum = num; sfx.tick(); } // 3·2·1
+  }
+  const me = G.me;
+  const prevD = me ? me.d : 0;
+  simulate(t);
+  // 100m마다 표지판 "딩동"
+  if (me && G.phase === "play" && Math.floor(me.d / 5000) > Math.floor(prevD / 5000) && me.d < EXIT_X) { sfx.sign(); popup(me.d + 70, me.y + (me.y < 200 ? 50 : -50), `${Math.floor(me.d / 5000) * 100}m!`, "#ffe9a8", 18, true); }
+  updateBees(dt, t);
+  updateCamera(dt, t);
+  // 내 순위가 오르면 "뿅"
+  updateRanking();
+  const r = me ? rankArr.indexOf(me) : -1;
+  if (G.phase === "play" && me && me.alive && rankPrev >= 0 && r < rankPrev && t - rankBeepAt > 700 && t - G.startAt > 1500) { sfx.pop(); rankBeepAt = t; }
+  rankPrev = r;
+  netSend(t);
+
+  // 날갯짓 바람 방울 (최대 40개)
+  if (me && me.alive && G.phase === "play" && me.press) {
+    windAcc += dt;
+    while (windAcc > 0.025) {
+      windAcc -= 0.025;
+      if (windCount < 40) spawn(0, me.d - 6 + Math.random() * 8, me.y + 12, speedNow() * 0.55, 150 + Math.random() * 90, 0.35, 2.5 + Math.random() * 2, "#ffffff");
+    }
+  } else windAcc = 0;
+  windCount = 0;
+  for (const p of parts) {
+    if (!p.on) continue;
+    p.life -= dt;
+    if (p.life <= 0) { p.on = false; continue; }
+    if (p.kind === 0) windCount++;
+    if (p.kind === 2) p.vy += 700 * dt; else if (p.kind === 3) { p.vy += 420 * dt; p.vx *= 1 - dt * 1.5; } else if (p.kind === 1) p.vy += 120 * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.rot += dt * 6;
+  }
+  const mv = me && me.alive && G.phase === "play" ? speedNow() * dt : 0; // 내 꿀벌 팝업은 꿀벌과 같이 움직여요
+  for (const p of pops) if (p.on) { p.life -= dt; p.y -= 50 * dt; if (p.follow) p.x += mv; if (p.life <= 0) p.on = false; }
+  if (shakeT > 0) shakeT = Math.max(0, shakeT - dt);
+  updateBuzz(t);
+}
+
+/* ===== 그리기 ===== */
+function roundRect(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function setFont(size, weight) { ctx.font = `${weight || "normal"} ${size}px ${FONT}`; }
+function text(s, x, y, size, align, weight, color, maxW) {
+  setFont(size, weight);
+  if (maxW) { const w = ctx.measureText(s).width; if (w > maxW) { size = Math.max(14, size * maxW / w); setFont(size, weight); } }
+  ctx.textAlign = align || "center"; ctx.textBaseline = "middle"; ctx.fillStyle = color || "#fff";
+  if (maxW) ctx.fillText(s, x, y, maxW); else ctx.fillText(s, x, y);
+}
+function textO(s, x, y, size, align, weight, color, maxW) {
+  setFont(size, weight);
+  if (maxW) { const w = ctx.measureText(s).width; if (w > maxW) { size = Math.max(14, size * maxW / w); setFont(size, weight); } }
+  ctx.textAlign = align || "center"; ctx.textBaseline = "middle";
+  ctx.lineJoin = "round"; ctx.lineWidth = 4; ctx.strokeStyle = "rgba(15,8,26,0.75)";
+  ctx.strokeText(s, x, y); ctx.fillStyle = color || "#fff"; ctx.fillText(s, x, y);
+}
+function fitStr(s, maxW) {
+  if (ctx.measureText(s).width <= maxW) return s;
+  let n = s.length;
+  while (n > 1 && ctx.measureText(s.slice(0, n) + "…").width > maxW) n--;
+  return s.slice(0, n) + "…";
+}
+function pill(cx, cy, w, h, color) { roundRect(cx - w / 2, cy - h / 2, w, h, h / 2); ctx.fillStyle = color; ctx.fill(); }
+function starPath(x, y, r, rot) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = rot - Math.PI / 2 + i * Math.PI / 5, rr = i % 2 ? r * 0.45 : r;
+    if (i) ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); else ctx.moveTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+  }
+  ctx.closePath();
+}
+
+// 꿀벌 (세계 좌표, 오른쪽을 봐요). alpha: 다른 꿀벌은 0.55
+function beeShape(color, mine, flap, fast, alpha, lw) {
+  const layers = fast ? 3 : 1; // 누르는 동안 날개 잔상 2겹
+  ctx.fillStyle = "#e8f6ff";
+  for (let i = layers - 1; i >= 0; i--) {
+    const open = 0.35 + 0.65 * Math.abs(Math.sin(flap - i * 0.8));
+    ctx.globalAlpha = alpha * (i === 0 ? 0.7 : 0.22);
+    ctx.beginPath(); ctx.ellipse(-5, -15, 7, 12 * open, -0.5, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(4, -16, 6, 11 * open, 0.25, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = "#2b2b2b";
+  ctx.beginPath(); ctx.moveTo(-18, -3); ctx.lineTo(-26, 0); ctx.lineTo(-18, 3); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.ellipse(0, 0, 20, 15, 0, 0, TAU); ctx.fill();
+  ctx.save(); ctx.clip();
+  ctx.fillStyle = "#2b2b2b"; ctx.fillRect(-11, -16, 5, 32); ctx.fillRect(-2, -16, 5, 32);
+  ctx.restore();
+  if (mine) { ctx.lineWidth = lw; ctx.strokeStyle = "#ffffff"; ctx.stroke(); }
+  ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.arc(11, -4, 4, 0, TAU); ctx.fill();
+  ctx.fillStyle = "#222222"; ctx.beginPath(); ctx.arc(12.4, -4, 2, 0, TAU); ctx.fill();
+  ctx.strokeStyle = "#2b2b2b"; ctx.lineWidth = 1.6; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.arc(12, 3, 4, 0.2 * Math.PI, 0.8 * Math.PI); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(11, -12); ctx.lineTo(17, -23); ctx.moveTo(6, -13); ctx.lineTo(8, -25); ctx.stroke();
+  ctx.fillStyle = "#2b2b2b";
+  ctx.beginPath(); ctx.arc(17, -23, 2.2, 0, TAU); ctx.moveTo(10.2, -25); ctx.arc(8, -25, 2.2, 0, TAU); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+function drawBee(b, t) {
+  const x = b.dispD, y = b.dispY;
+  let alpha = b.isMe ? 1 : 0.55;
+  if (b.exit) alpha *= clamp(1 - (t - b.exitAt) / 1200, 0, 1);
+  if (alpha <= 0.01) return;
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(b.tilt);
+  const fast = (b.alive || b.exit) && (b.isMe ? b.press && G.phase === "play" : b.dispVy < -60);
+  beeShape(b.color, b.isMe, (b.alive || b.exit) ? b.flap : 0.3, fast, alpha, 2 / S);
+  ctx.restore();
+  if (!b.alive && !b.exit) {
+    // 머리 위 빙글빙글 별
+    ctx.fillStyle = "#ffe066"; ctx.globalAlpha = b.isMe ? 1 : 0.7;
+    for (let i = 0; i < 3; i++) {
+      const a = t / 220 + i * TAU / 3;
+      starPath(x + Math.cos(a) * 15, y - 25 + Math.sin(a) * 5, 5, a);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+function drawHoney(x, y) {
+  ctx.fillStyle = "rgba(255,179,0,0.3)"; ctx.beginPath(); ctx.arc(x, y, 18, 0, TAU); ctx.fill();
+  ctx.fillStyle = "#ffb300";
+  ctx.beginPath(); ctx.moveTo(x, y - 13); ctx.quadraticCurveTo(x + 9, y - 3, x + 9, y + 3);
+  ctx.arc(x, y + 3, 9, 0, Math.PI); ctx.quadraticCurveTo(x - 9, y - 3, x, y - 13); ctx.fill();
+  ctx.fillStyle = "#fff3c4"; ctx.beginPath(); ctx.ellipse(x - 3, y + 1, 2.2, 3.6, -0.4, 0, TAU); ctx.fill();
+}
+
+function drawWorld(t) {
+  const x0 = camD - BEE_X - 30, x1 = camD - BEE_X + W / S + 30;
+  const yTop = -BT / S - 20, yBot = (H - BT) / S + 20;
+  // 바위 (띠 밖 위아래도 바위벽이 이어져요)
+  ctx.fillStyle = rockPat || "#6b4a2f";
+  ctx.fillRect(x0, yTop, x1 - x0, yBot - yTop);
+  // 통로: 20단위 간격으로 천장·바닥을 찍어요
+  let n = 0;
+  for (let x = Math.floor(x0 / 20) * 20; x <= x1 + 20 && n < PTS; x += 20) { PX[n] = x; PCe[n] = ceilAt(x); PFl[n] = floorAt(x); n++; }
+  ctx.beginPath(); ctx.moveTo(PX[0], PCe[0]);
+  for (let i = 1; i < n; i++) ctx.lineTo(PX[i], PCe[i]);
+  for (let i = n - 1; i >= 0; i--) ctx.lineTo(PX[i], PFl[i]);
+  ctx.closePath();
+  ctx.fillStyle = passGrad; ctx.fill();
+  // 희미한 청록 수정 (통로 안에만)
+  ctx.save(); ctx.clip();
+  const span = W / S + 160, base = camD - BEE_X - 80;
+  ctx.fillStyle = "rgba(94,224,208,0.25)";
+  for (const c of CRYSTALS) {
+    const cx = base + (((c[0] - camD * 0.3) % span) + span) % span, cy = c[1], s = c[2];
+    ctx.beginPath(); ctx.moveTo(cx, cy - s); ctx.lineTo(cx + s * 0.35, cy - s * 0.2); ctx.lineTo(cx + s * 0.22, cy + s * 0.6);
+    ctx.lineTo(cx - s * 0.22, cy + s * 0.6); ctx.lineTo(cx - s * 0.35, cy - s * 0.2); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(cx + s * 0.5, cy - s * 0.4); ctx.lineTo(cx + s * 0.7, cy + s * 0.1); ctx.lineTo(cx + s * 0.55, cy + s * 0.6); ctx.lineTo(cx + s * 0.35, cy + s * 0.2); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+  // 밝은 테두리
+  ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.strokeStyle = "#9a6b40"; ctx.lineWidth = Math.max(3, 4 * S) / S;
+  ctx.beginPath(); ctx.moveTo(PX[0], PCe[0]); for (let i = 1; i < n; i++) ctx.lineTo(PX[i], PCe[i]); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(PX[0], PFl[0]); for (let i = 1; i < n; i++) ctx.lineTo(PX[i], PFl[i]); ctx.stroke();
+
+  // 100m 표지판 기둥
+  for (let j = Math.max(1, Math.ceil(x0 / 5000)); j * 5000 <= x1 && j < 15; j++) {
+    const x = j * 5000, fy = floorAt(x);
+    ctx.fillStyle = "#7a4f26"; ctx.fillRect(x - 3, fy - 30, 6, 34);
+  }
+  // 장애물
+  const kS = Math.max(0, Math.floor(x0 / SEG) - 1), kE = Math.min(NSEG, Math.ceil(x1 / SEG) + 1);
+  for (let k = kS; k <= kE; k++) {
+    const typ = obT[k];
+    if (!typ) continue;
+    const x = k * SEG;
+    if (typ === 3) {
+      roundRect(x - ROCK_W / 2, obA[k], ROCK_W, obB[k], ROCK_R);
+      ctx.fillStyle = rockPat; ctx.fill(); ctx.strokeStyle = "#9a6b40"; ctx.stroke();
+      ctx.strokeStyle = "#3f2a18"; ctx.lineWidth = 2 / Math.max(S, 0.5);
+      const top = obA[k], h = obB[k];
+      ctx.beginPath(); ctx.moveTo(x - 12, top + 3); ctx.lineTo(x - 5, top + h * 0.35); ctx.lineTo(x - 10, top + h * 0.6);
+      ctx.moveTo(x + 14, top + h - 3); ctx.lineTo(x + 6, top + h * 0.62); ctx.lineTo(x + 11, top + h * 0.4); ctx.stroke();
+      ctx.lineWidth = Math.max(3, 4 * S) / S;
+      continue;
+    }
+    // 판정(hitCave)과 같은 모양 정보(spikeGeom)로 그려요. 벽 속으로 10단위 더 채워서 이음새가 안 보여요.
+    spikeGeom(k);
+    const rock = typ === 1 ? -10 : 10;
+    ctx.beginPath(); ctx.moveTo(SG[0], SG[1] + rock); ctx.lineTo(SG[0], SG[1]); ctx.lineTo(SG[2], SG[3]);
+    ctx.quadraticCurveTo(SG[4], SG[5], SG[6], SG[7]); ctx.lineTo(SG[8], SG[9]); ctx.lineTo(SG[8], SG[9] + rock); ctx.closePath();
+    ctx.fillStyle = rockPat; ctx.fill();
+    ctx.beginPath(); ctx.moveTo(SG[0], SG[1]); ctx.lineTo(SG[2], SG[3]); ctx.quadraticCurveTo(SG[4], SG[5], SG[6], SG[7]); ctx.lineTo(SG[8], SG[9]);
+    ctx.strokeStyle = "#9a6b40"; ctx.stroke();
+  }
+  // 동굴 출구 (1,500m): 밝은 빛과 꽃밭
+  if (x1 > EXIT_X - 320) {
+    ctx.fillStyle = exitGrad; ctx.fillRect(EXIT_X - 320, yTop, 320, yBot - yTop);
+    ctx.fillStyle = "#fff6d6"; ctx.fillRect(EXIT_X - 3, yTop, Math.max(0, x1 - EXIT_X + 43), yBot - yTop);
+    ctx.fillStyle = "#9be07a"; ctx.fillRect(EXIT_X + 30, 520, Math.max(0, x1 - EXIT_X + 10), yBot - 520);
+    for (let i = 0; i < 12; i++) {
+      const fx = EXIT_X + 60 + i * 75;
+      if (fx > x1) break;
+      ctx.fillStyle = "#4caf50"; ctx.fillRect(fx - 1.5, 490, 3, 32);
+      ctx.fillStyle = OTHER_COLORS[i % 4];
+      for (let p = 0; p < 5; p++) { const a = p / 5 * TAU; ctx.beginPath(); ctx.arc(fx + Math.cos(a) * 7, 486 + Math.sin(a) * 7, 5, 0, TAU); ctx.fill(); }
+      ctx.fillStyle = "#ffc93c"; ctx.beginPath(); ctx.arc(fx, 486, 4, 0, TAU); ctx.fill();
+    }
+  }
+  // 꿀방울 (내가 먹은 건 숨겨요. 남이 먹어도 내 꿀은 남아 있어요)
+  const me = G.me;
+  const hS = Math.max(0, Math.floor((x0 - 100) / SEG)), hE = Math.min(NSEG, Math.ceil((x1 - 100) / SEG));
+  for (let k = hS; k <= hE; k++) {
+    if (hnY[k] < 0 || (me && me.taken[k])) continue;
+    drawHoney(k * SEG + 100, hnY[k] + Math.sin(t / 300 + k) * 2);
+  }
+  // 꿀벌: 떨어진 꿀벌 → 다른 꿀벌 → 나
+  if (G.phase !== "lobby") {
+    for (const b of G.roster) if (!b.alive && !b.exit && !b.isMe) drawBee(b, t);
+    for (const b of G.roster) if ((b.alive || b.exit) && !b.isMe) drawBee(b, t);
+    if (me) drawBee(me, t);
+  }
+  // 파티클
+  for (const p of parts) {
+    if (!p.on) continue;
+    const a = clamp(p.life / p.max, 0, 1);
+    ctx.globalAlpha = p.kind === 0 ? a * 0.7 : a;
+    ctx.fillStyle = p.color;
+    if (p.kind === 2) { starPath(p.x, p.y, p.size, p.rot); ctx.fill(); }
+    else if (p.kind === 3) { ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillRect(-p.size, -p.size * 0.5, p.size * 2, p.size); ctx.restore(); }
+    else { ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, TAU); ctx.fill(); }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawScreenLayer(t) {
+  // 100m 표지판 글씨 (14px 이상이라 화면 좌표로 그려요)
+  const x0 = camD - BEE_X - 80, x1 = camD - BEE_X + W / S + 80;
+  setFont(14, "800");
+  for (let j = Math.max(1, Math.ceil(x0 / 5000)); j * 5000 <= x1 && j < 15; j++) {
+    const x = j * 5000, label = `${j * 100}m`;
+    const w = ctx.measureText(label).width + 14, px = sx(x), py = sy(floorAt(x) - 30) - 10;
+    roundRect(px - w / 2, py - 12, w, 24, 5); ctx.fillStyle = "#c48a4a"; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = "#7a4f26"; ctx.stroke();
+    text(label, px, py + 1, 14, "center", "800", "#3a230f");
+  }
+  if (x1 > EXIT_X - 200) {
+    const px = sx(EXIT_X), py = sy(ceilAt(EXIT_X - 60)) + 30;
+    pill(px, py, 76, 30, "rgba(255,255,255,0.85)");
+    text("출구", px, py + 1, 16, "center", "900", "#7a4f26");
+  }
+  // 이름표 (처음 2초와 떨어질 때만): 출발할 땐 꿀벌 오른쪽에 겹치지 않게 쌓고, 떨어질 땐 머리 위에. 이모티콘은 머리 위에.
+  const showStart = G.phase === "count" || (G.phase === "play" && t - G.startAt < 2000);
+  const ph = clamp(30 * S - 2, 17, 20);
+  let tagN = 0;
+  for (let i = 0; i < G.roster.length; i++) {
+    const b = G.roster[i];
+    if (G.phase === "lobby") break;
+    const bx = sx(b.dispD), by = sy(b.dispY);
+    if (bx < -60 || bx > W + 60) continue;
+    const dead = !b.alive && !b.exit;
+    if (dead && t - b.deadAt < 2500 && G.phase === "play") drawTag(b, bx, by - (BEE_R + 14) * S - 14, true, ph);
+    else if (showStart && !dead && tagN < 4) { TAG_I[tagN] = i; TAG_Y[tagN] = by; tagN++; }
+    if (b.emote && b.emoteUntil > t) {
+      const ey = by - (BEE_R + 14) * S - 34;
+      roundRect(bx - 22, ey - 17, 44, 34, 17); ctx.fillStyle = "#ffffff"; ctx.fill();
+      text(b.emote, bx, ey + 1, 20, "center", "normal", "#000");
+    }
+  }
+  for (let i = 1; i < tagN; i++) {
+    for (let j = i; j > 0 && TAG_Y[j - 1] > TAG_Y[j]; j--) {
+      const ti = TAG_I[j]; TAG_I[j] = TAG_I[j - 1]; TAG_I[j - 1] = ti;
+      const ty = TAG_Y[j]; TAG_Y[j] = TAG_Y[j - 1]; TAG_Y[j - 1] = ty;
+    }
+  }
+  for (let i = 1; i < tagN; i++) if (TAG_Y[i] < TAG_Y[i - 1] + ph + 1) TAG_Y[i] = TAG_Y[i - 1] + ph + 1;
+  for (let pass = 0; pass < 2; pass++) { // 내 이름표를 맨 위에
+    for (let i = 0; i < tagN; i++) {
+      const b = G.roster[TAG_I[i]];
+      if (b.isMe === (pass === 1)) drawTag(b, sx(b.dispD), TAG_Y[i], false, ph);
+    }
+  }
+  // 점수 팝업
+  for (const p of pops) {
+    if (!p.on) continue;
+    ctx.globalAlpha = clamp(p.life * 2, 0, 1);
+    textO(p.text, sx(p.x), sy(p.y), p.size, "center", "900", p.color);
+  }
+  ctx.globalAlpha = 1;
+}
+
+const TAG_I = [0, 0, 0, 0], TAG_Y = [0, 0, 0, 0];
+function drawTag(b, bx, y, above, ph) {
+  const label = b.isMe ? "나" : b.name;
+  setFont(14, "800");
+  const w = ctx.measureText(label).width + 12;
+  const lx = above ? bx : bx + (BEE_R + 4) * S + w / 2 + 2;
+  pill(lx, y, w, ph, b.isMe ? "rgba(255,201,60,0.92)" : "rgba(20,12,34,0.72)");
+  text(label, lx, y + 1, 14, "center", "800", b.isMe ? "#3a230f" : "#ffffff");
+}
+function drawHint(t) {
+  // "여기를 꾹!" 손가락 원 (지름 90px)
+  const r = 45, pulse = 1 + Math.sin(t / 220) * 0.06;
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = "rgba(255,255,255,0.16)"; ctx.beginPath(); ctx.arc(HINT_X, HINT_Y, r * pulse, 0, TAU); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.6)"; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.beginPath(); ctx.arc(HINT_X, HINT_Y - 12, 7, 0, TAU); ctx.fill();
+  roundRect(HINT_X - 7, HINT_Y - 12, 14, 18, 5); ctx.fill();
+  ctx.globalAlpha = 1;
+  text("여기를 꾹!", HINT_X, HINT_Y + 20, 14, "center", "800", "#ffffff");
+}
+
+function drawBoard(t) {
+  const n = rankArr.length;
+  if (!n) return;
+  const fs = BOARD_FS, lh = fs + 6, w = BOARD_W, x = W - 10 - w, y = 58;
+  const h = 12 + lh + n * lh;
+  roundRect(x, y, w, h, 12); ctx.fillStyle = HUD_MARGIN ? "rgba(20,12,34,0.5)" : "rgba(20,12,34,0.62)"; ctx.fill();
+  text(`남은 꿀벌 ${aliveCount()}/${n}`, x + 12, y + 6 + lh / 2, fs, "left", "800", "#ffe9a8", w - 24);
+  for (let i = 0; i < n; i++) {
+    const b = rankArr[i], ry = y + 6 + lh * (i + 1) + lh / 2;
+    ctx.fillStyle = b.color; ctx.beginPath(); ctx.arc(x + 17, ry, 5, 0, TAU); ctx.fill();
+    const val = b.alive ? `${Math.floor((G.phase === "play" ? liveD : b.dispD) / UNIT_PER_M)}m` : b.exit ? "완주" : "쿵";
+    setFont(fs, "800");
+    const vw = ctx.measureText(val).width;
+    const emo = b.emote && b.emoteUntil > t;
+    setFont(fs, b.isMe ? "900" : "700");
+    const nm = fitStr(b.isMe ? "나" : b.name, w - 40 - vw - 10 - (emo ? 22 : 0));
+    text(nm, x + 28, ry, fs, "left", b.isMe ? "900" : "700", b.isMe ? "#ffd23f" : "#ffffff");
+    if (emo) { const nw = ctx.measureText(nm).width; text(b.emote, x + 30 + nw + 10, ry, 15, "center"); }
+    text(val, x + w - 12, ry, fs, "right", "800", b.alive ? "#ffffff" : b.exit ? "#9be07a" : "#ff9a9a");
+  }
+}
+
+function aliveCount() {
+  let alive = 0;
+  for (const b of G.roster) if (b.alive && !(G.phase === "result" && !b.flying)) alive++;
+  return alive;
+}
+// 좁은 화면: 순위판 대신 한 줄 요약 (위 바위 줄 오른쪽)
+function drawSummary(leftEdge) {
+  const n = rankArr.length;
+  if (!n) return;
+  const me = G.me, a = aliveCount();
+  const s = me ? `남은 꿀벌 ${a}/${n} · 내 순위 ${rankArr.indexOf(me) + 1}등` : `남은 꿀벌 ${a}/${n}`;
+  const right = SUMMARY_Y === 60 ? W - 14 : W - 60;
+  textO(s, right, SUMMARY_Y, 15, "right", "800", "#ffe9a8", Math.max(60, right - leftEdge - 12));
+}
+// 알림 ("컴퓨터 하나 쿵!"): 최신 것부터. 꿀벌 앞 통로 위에는 띄우지 않아요.
+function drawNotes(t, bannerBottom, guide) {
+  if (G.phase === "result") return;
+  let x, y, h, maxRows, maxW;
+  if (NOTE_SIDE) {
+    const n = BOARD_FULL ? rankArr.length : 0;
+    x = (FRONT_X1 + W) / 2; h = 26; maxRows = 3; maxW = W - FRONT_X1 - 16;
+    y = n ? 58 + 12 + (BOARD_FS + 6) * (n + 1) + 24 : 92;
+  } else {
+    if (guide) return; // 처음 3초 안내와 겹치지 않게 그 뒤에 보여줘요 (notify가 시간을 미뤄 둬요)
+    x = W / 2; h = NOTE_H; maxW = W - 20;
+    y = bannerBottom > 0 ? Math.min(H - h / 2 - 1, bannerBottom + h / 2 + 3) : NOTE_Y;
+    maxRows = clamp(Math.floor((H - (y - h / 2)) / (h + 4)), 1, 3);
+  }
+  const fs = h >= 22 ? 15 : 14;
+  let drawn = 0;
+  for (let row = 0; row < maxRows; row++) {
+    let pick = -1;
+    for (let i = 0; i < notes.length; i++) {
+      if (drawn & (1 << i) || notes[i].until <= t) continue;
+      if (pick < 0 || notes[i].until > notes[pick].until) pick = i;
+    }
+    if (pick < 0) break;
+    drawn |= 1 << pick;
+    const nn = notes[pick], yy = y + row * (h + 4);
+    ctx.globalAlpha = clamp((nn.until - t) / 300, 0, 1);
+    setFont(fs, "800");
+    const w = Math.min(maxW, ctx.measureText(nn.text).width + 24);
+    pill(x, yy, w, h, "rgba(20,12,34,0.8)");
+    text(nn.text, x, yy + 1, fs, "center", "800", "#ffffff", w - 14);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawHud(t) {
+  if (G.phase === "lobby") return;
+  const me = G.me;
+  let leftEdge = 14;
+  if (me) {
+    textO(`${me.score}점`, 14, 30, 28, "left", "900", "#ffffff");
+    const sub = `${Math.floor(me.d / UNIT_PER_M)}m · 꿀 ${me.honey}`;
+    textO(sub, 14, 60, 16, "left", "700", "#ffe9a8");
+    if (SUMMARY_Y === 60) leftEdge = 14 + ctx.measureText(sub).width;
+    else { setFont(28, "900"); leftEdge = 14 + ctx.measureText(`${me.score}점`).width; }
+  } else {
+    textO("구경 중", 14, 30, 20, "left", "900", "#ffffff");
+    if (SUMMARY_Y === 30) leftEdge = 14 + ctx.measureText("구경 중").width;
+  }
+  if (G.phase !== "result") { if (BOARD_FULL) drawBoard(t); else drawSummary(leftEdge); }
+  let bannerBottom = 0, guide = false;
+  if (G.phase === "count" || G.phase === "play") {
+    const early = G.phase === "count" || t - G.startAt < 3000;
+    if (me && early) {
+      guide = true;
+      // 처음 3초: 조작 안내
+      setFont(16, "800");
+      const label = "꾹 누르면 올라가요 · 떼면 내려가요", w = Math.min(W - 20, ctx.measureText(label).width + 28);
+      pill(W / 2, GUIDE_Y, w, 32, "rgba(20,12,34,0.72)");
+      text(label, W / 2, GUIDE_Y + 1, 16, "center", "800", "#ffe9a8", w - 20);
+      drawHint(t);
+    } else if (!me) {
+      bannerBottom = bottomBanner(W < 420 ? "이번 판은 구경해요." : "이번 판은 구경해요. 다음 판부터 같이 해요!", W < 420 ? "다음 판부터 같이 해요!" : "");
+    } else if (!me.alive && G.phase === "play" && t - me.deadAt > 1300) {
+      bannerBottom = bottomBanner(me.exit ? "완주! 남은 꿀벌을 구경해요" : "쿵! 남은 꿀벌을 구경해요", `내 기록 ${Math.floor(me.d / UNIT_PER_M)}m · 꿀 ${me.honey} · ${me.score}점`);
+    }
+  }
+  drawNotes(t, bannerBottom, guide);
+}
+function bottomBanner(a, b) {
+  setFont(16, "800");
+  let w = ctx.measureText(a).width;
+  if (b) { setFont(14, "700"); w = Math.max(w, ctx.measureText(b).width); }
+  w = Math.min(W - 16, w + 32);
+  const h = b ? 52 : 32, y = BOTTOM_Y - (b ? 10 : 0);
+  roundRect(W / 2 - w / 2, y - h / 2, w, h, 14); ctx.fillStyle = "rgba(20,12,34,0.78)"; ctx.fill();
+  if (b) {
+    text(a, W / 2, y - 11, 16, "center", "800", "#ffffff", w - 16);
+    text(b, W / 2, y + 12, 14, "center", "700", "#ffe9a8", w - 16);
+  } else text(a, W / 2, y + 1, 16, "center", "800", "#ffffff", w - 16);
+  return y + h / 2;
+}
+
+function card(x, y, w, h) {
+  roundRect(x, y, w, h, 20); ctx.fillStyle = "rgba(42,31,61,0.95)"; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = "#9a6b40"; ctx.stroke();
+}
+function drawLobby(t) {
+  ctx.fillStyle = "rgba(12,8,24,0.5)"; ctx.fillRect(0, 0, W, H);
+  let cw = Math.min(W - 24, 420);
+  const ch = Math.min(H - 24, 300);
+  let top = H / 2 - ch / 2;
+  if (HINT_BELOW) top = Math.max(12, Math.min(top, HINT_Y - 45 - 10 - ch));
+  if (top < 56) cw = Math.min(cw, W - 120); // 음소거 버튼과 겹치지 않게
+  const x = W / 2 - cw / 2;
+  card(x, top, cw, ch);
+  text("붕붕 꿀벌 동굴 레이스", W / 2, top + ch * 0.13, Math.min(30, (cw - 24) / 10), "center", "900", ME_COLOR, cw - 24);
+  ctx.save();
+  ctx.translate(W / 2, top + ch * 0.34 + Math.sin(t / 400) * 6);
+  const bs = clamp(ch / 260, 0.9, 1.25);
+  ctx.scale(bs, bs); ctx.rotate(Math.sin(t / 400 + 1) * 0.12);
+  beeShape(ME_COLOR, true, t / 25, true, 1, 2 / bs);
+  ctx.restore();
+  text("꾹 누르면 올라가요 · 떼면 내려가요", W / 2, top + ch * 0.53, 16, "center", "700", "#ffffff", cw - 24);
+  const status = online ? `다른 플레이어를 기다리는 중 (${humans.length}/4)` : "혼자 모드 · 컴퓨터 꿀벌과 함께해요";
+  text(status, W / 2, top + ch * 0.65, 16, "center", "600", "#d9cdf0", cw - 24);
+  const pulse = 1 + Math.sin(t / 260) * 0.04;
+  text("탭하거나 스페이스를 눌러 시작", W / 2, top + ch * 0.79, 18 * pulse, "center", "900", "#ffd23f", cw - 24);
+  let sub = "";
+  if (joinState === "ok") {
+    const end = isHost() ? G.lobbySince + lobbyWait() : G.phaseEnd;
+    const left = Math.ceil((end - t) / 1000);
+    sub = left > 0 ? `${left}초 뒤에 자동으로 시작해요` : "곧 시작해요";
+  } else sub = "컴퓨터 꿀벌 둘과 같이 날아요";
+  text(sub, W / 2, top + ch * 0.9, 14, "center", "600", "#bfb2d9", cw - 24);
+  // "여기를 꾹!"은 카드와 겹치지 않을 때만 (작은 가로 화면에서는 카드 안 안내로 충분해요)
+  if (!(HINT_X + 45 > x && HINT_X - 45 < x + cw && HINT_Y + 45 > top && HINT_Y - 45 < top + ch)) drawHint(t);
+}
+function drawCount(t) {
+  const left = Math.ceil((G.startAt - t) / 1000);
+  if (left >= 1 && left <= 3) {
+    const f = (G.startAt - t) / 1000 - (left - 1), size = clamp(Math.min(W, H) * 0.22, 64, 150) * (0.85 + f * 0.25);
+    textO(String(left), W / 2, BT + BAND * S * 0.42, size, "center", "900", "#ffffff");
+  }
+}
+function drawGo(t) {
+  const k = (t - goAt) / 800;
+  if (k < 0 || k > 1) return;
+  ctx.globalAlpha = 1 - k;
+  textO("출발!", W / 2, BT + BAND * S * 0.42, clamp(Math.min(W, H) * 0.14, 44, 96) * (1 + k * 0.2), "center", "900", ME_COLOR);
+  ctx.globalAlpha = 1;
+}
+function crown(x, y) {
+  ctx.fillStyle = "#ffd23f";
+  ctx.beginPath(); ctx.moveTo(x - 11, y + 7); ctx.lineTo(x - 12, y - 6); ctx.lineTo(x - 5, y); ctx.lineTo(x, y - 9);
+  ctx.lineTo(x + 5, y); ctx.lineTo(x + 12, y - 6); ctx.lineTo(x + 11, y + 7); ctx.closePath(); ctx.fill();
+}
+function drawResult(t) {
+  const since = t - G.resultAt;
+  if (since < RESULT_CARD_DELAY) return; // 쿵 하는 모습을 먼저 보여줘요
+  const a = clamp((since - RESULT_CARD_DELAY) / 250, 0, 1);
+  ctx.globalAlpha = a;
+  ctx.fillStyle = "rgba(12,8,24,0.55)"; ctx.fillRect(0, 0, W, H);
+  const me = G.me, rows = rankArr.length;
+  let cw = Math.min(W - 24, 400);
+  const head = 58, mine = me ? 32 : 0, foot = 46;
+  let rowH = 46;
+  let ch = head + rows * rowH + mine + foot + 8;
+  if (ch > H - 16) { rowH = Math.max(34, (H - 16 - head - mine - foot - 8) / Math.max(1, rows)); ch = head + rows * rowH + mine + foot + 8; }
+  const y = Math.max(8, H / 2 - ch / 2);
+  if (y < 56) cw = Math.min(cw, W - 120); // 음소거 버튼과 겹치지 않게
+  const x = W / 2 - cw / 2;
+  card(x, y, cw, ch);
+  const title = !me ? "이번 판 결과" : me.exit ? "완주했어요!" : rankArr[0] === me ? "1등이에요!" : "쿵! 이번 판 결과";
+  text(title, W / 2, y + 30, Math.min(26, cw / 12), "center", "900", ME_COLOR, cw - 24);
+  for (let i = 0; i < rows; i++) {
+    const b = rankArr[i], ry = y + head + i * rowH + rowH / 2;
+    if (b.isMe) { roundRect(x + 8, ry - rowH / 2 + 2, cw - 16, rowH - 4, 10); ctx.fillStyle = "rgba(255,201,60,0.14)"; ctx.fill(); }
+    if (i === 0) crown(x + 26, ry); else text(String(i + 1), x + 26, ry, 16, "center", "900", "#d9cdf0");
+    ctx.save(); ctx.translate(x + 56, ry + 1); ctx.scale(0.62, 0.62);
+    beeShape(b.color, b.isMe, 1, false, 1, 3); ctx.restore();
+    setFont(15, "800");
+    const nameW = cw - 80 - 82;
+    const nm = fitStr(b.isMe && b.name !== "나" ? `${b.name} (나)` : b.name, nameW);
+    text(nm, x + 80, ry - 9, 15, "left", "800", b.isMe ? "#ffd23f" : "#ffffff");
+    const m = Math.floor(b.fD / UNIT_PER_M);
+    const sub = b.flying ? `${m}m · 계속 날았어요` : b.fE ? `${m}m · 완주` : `${m}m`;
+    text(sub, x + 80, ry + 11, 14, "left", "600", "#bfb2d9", nameW);
+    text(`${b.fSc}점`, x + cw - 16, ry, 17, "right", "900", "#ffd23f");
+  }
+  let yy = y + head + rows * rowH;
+  if (me) { text(`내 점수 ${me.fSc} · 최고 ${best}`, W / 2, yy + 16, 16, "center", "800", "#ffffff", cw - 24); yy += mine; }
+  const solo = humans.length < 2;
+  if (solo && isHost()) {
+    const ready = t >= ignoreUntil && since > 1000;
+    text("탭하거나 스페이스를 눌러 다시 하기", W / 2, yy + 22, 17, "center", "900", ready ? "#ffd23f" : "rgba(255,210,63,0.45)", cw - 24);
+  } else {
+    const left = Math.max(0, Math.ceil((G.phaseEnd - t) / 1000));
+    text(`곧 다음 판이 시작돼요 (${left}초)`, W / 2, yy + 22, 15, "center", "700", "#d9cdf0", cw - 24);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function draw(t) {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (W < 20 || H < 20) return;
+  SHX = 0; SHY = 0;
+  if (shakeT > 0) { const k = shakeT / 0.3; SHX = (Math.random() * 2 - 1) * 8 * k; SHY = (Math.random() * 2 - 1) * 8 * k; }
+  ctx.save();
+  ctx.translate(SHX + (BEE_X - camD) * S, SHY + BT);
+  ctx.scale(S, S);
+  drawWorld(t);
+  ctx.restore();
+  drawScreenLayer(t);
+  // 꿀벌 앞 420단위부터 어둠
+  const dx = (BEE_X + VIEW_AHEAD) * S;
+  if (dx < W) { ctx.fillStyle = darkGrad; ctx.fillRect(dx, 0, W - dx, H); }
+  drawHud(t);
+  if (G.phase === "lobby") drawLobby(t);
+  else if (G.phase === "count") drawCount(t);
+  else if (G.phase === "play") drawGo(t);
+  else if (G.phase === "result") drawResult(t);
+}
+
+/* ===== 메인 루프 (iframe 크기가 늦게 잡혀도 매 프레임 확인해요) ===== */
+let last = now();
+function loop(ts) {
+  const t = now();
+  const dt = Math.min(0.05, Math.max(0, (t - last) / 1000));
+  last = t;
+  if (window.innerWidth !== W || window.innerHeight !== H) resize();
+  update(dt, t);
+  draw(t);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
