@@ -22,8 +22,11 @@ jobs:
       SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
     steps:
       - uses: actions/checkout@v4
+      # CLI 버전을 고정해요. "latest"는 실행 때마다 GitHub에 최신 버전을 물어봐서 요청 제한에 걸릴 수 있어요.
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 3.0.0
       - run: supabase link --project-ref "$SUPABASE_PROJECT_ID"
-      - run: supabase db push
+      # CLI v3부터 db push는 기본이 내 컴퓨터(로컬) DB라서 --remote로 연결한 프로젝트를 지정하고,
+      # CI에서는 확인 질문에 답할 수 없어서 --yes를 붙여요.
+      - run: supabase db push --remote --yes
