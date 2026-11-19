@@ -159,12 +159,114 @@ window.addEventListener("keydown", (e) => {
 });
 window.addEventListener("keyup", (e) => keys.delete(e.key));
 canvas.addEventListener("pointerdown", (e) => {
+  if (pressButtonAt(e)) return; // 화면 버튼(부품 상자)을 누른 거면 버튼만 처리해요
   pointer.down = true; pointer.x = e.clientX; pointer.y = e.clientY;
   onPress("pointer");
 });
 canvas.addEventListener("pointermove", (e) => { pointer.x = e.clientX; pointer.y = e.clientY; });
-window.addEventListener("pointerup", () => { pointer.down = false; });
-window.addEventListener("pointercancel", () => { pointer.down = false; });
+window.addEventListener("pointerup", (e) => { releaseButton(e); pointer.down = false; });
+window.addEventListener("pointercancel", (e) => { releaseButton(e); pointer.down = false; });
+
+/* ===== 부품 상자 (검증된 공통 부품. 필요한 것만 쓰고, 안 쓰는 건 지워도 돼요) =====
+   - 화면 버튼:   addButton("jump", "점프", (W, H) => ({ x: W - 90, y: H - 90, w: 72, h: 72 }));
+                  buttonDown("jump") → 누르고 있는 동안 true. 누른 순간에는 onPress("btn:jump")가 불려요.
+                  버튼 위치는 함수라서 화면 크기가 바뀌면 다시 계산돼요. 크기는 최소 48px로 맞춰져요.
+   - 파티클:      burst(x, y, "#f59e0b", 12)   (전체 최대 MAX_PARTICLES개, 넘으면 오래된 것부터 재사용)
+   - 점수 팝업:   popup(x, y, "+1", "#fff")     (최대 MAX_POPUPS개)
+   - 화면 흔들림: shake(6, 0.15)               (세기 px, 시간 초)
+   - 시작/끝 화면: drawTitle(제목, 조작법 한 줄), drawOver(score, best)
+   update에서 updateFx(dt), draw 시작에 beginShake(), 끝에 endShake() → drawFx() → drawButtons() 순서로 불러요. */
+const buttons = [];
+function addButton(id, label, layout) { buttons.push({ id, label, layout, down: false, pid: null }); }
+function buttonRect(b) {
+  const r = b.layout(W, H);
+  const w = Math.max(48, r.w), h = Math.max(48, r.h);
+  return { x: r.x - (w - r.w) / 2, y: r.y - (h - r.h) / 2, w, h };
+}
+function buttonDown(id) { for (const b of buttons) if (b.id === id) return b.down; return false; }
+function pressButtonAt(e) {
+  if (state !== "play") return false; // 시작·끝 화면에서는 아무 데나 탭하면 시작해요
+  for (const b of buttons) {
+    const r = buttonRect(b);
+    if (e.clientX >= r.x && e.clientX <= r.x + r.w && e.clientY >= r.y && e.clientY <= r.y + r.h) {
+      b.down = true; b.pid = e.pointerId;
+      onPress("btn:" + b.id);
+      return true;
+    }
+  }
+  return false;
+}
+function releaseButton(e) { for (const b of buttons) if (b.pid === e.pointerId) { b.down = false; b.pid = null; } }
+function drawButtons() {
+  if (state !== "play") return;
+  for (const b of buttons) {
+    const r = buttonRect(b);
+    ctx.fillStyle = b.down ? "rgba(255,255,255,.35)" : "rgba(255,255,255,.16)";
+    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(r.x, r.y, r.w, r.h, 14); else ctx.rect(r.x, r.y, r.w, r.h); ctx.fill();
+    text(b.label, r.x + r.w / 2, r.y + r.h / 2, 16, "center", "bold");
+  }
+}
+
+const MAX_PARTICLES = 120, MAX_POPUPS = 12;
+const particles = []; let particleNext = 0; // 미리 만든 객체를 돌려 써요 (매 프레임 새로 만들지 않아요)
+const popups = []; let popupNext = 0;
+for (let i = 0; i < MAX_PARTICLES; i++) particles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, color: "#fff", size: 3 });
+for (let i = 0; i < MAX_POPUPS; i++) popups.push({ x: 0, y: 0, life: 0, text: "", color: "#fff" });
+function burst(x, y, color = "#fff", n = 10, speed = 180) {
+  for (let i = 0; i < n; i++) {
+    const p = particles[particleNext]; particleNext = (particleNext + 1) % MAX_PARTICLES;
+    const a = Math.random() * Math.PI * 2, v = speed * (0.4 + Math.random() * 0.6);
+    p.x = x; p.y = y; p.vx = Math.cos(a) * v; p.vy = Math.sin(a) * v;
+    p.max = p.life = 0.35 + Math.random() * 0.3; p.color = color; p.size = 2 + Math.random() * 3;
+  }
+}
+function popup(x, y, s, color = "#fff") {
+  const p = popups[popupNext]; popupNext = (popupNext + 1) % MAX_POPUPS;
+  p.x = x; p.y = y; p.life = 0.7; p.text = s; p.color = color;
+}
+let shakeTime = 0, shakePower = 0;
+function shake(power = 6, time = 0.15) { shakePower = Math.max(shakePower, power); shakeTime = Math.max(shakeTime, time); }
+function updateFx(dt) {
+  for (const p of particles) if (p.life > 0) { p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 400 * dt; }
+  for (const p of popups) if (p.life > 0) { p.life -= dt; p.y -= 50 * dt; }
+  if (shakeTime > 0) { shakeTime -= dt; if (shakeTime <= 0) shakePower = 0; }
+}
+function beginShake() {
+  ctx.save();
+  if (shakeTime > 0) ctx.translate((Math.random() - 0.5) * 2 * shakePower, (Math.random() - 0.5) * 2 * shakePower);
+}
+function endShake() { ctx.restore(); }
+function drawFx() {
+  for (const p of particles) if (p.life > 0) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max); ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  for (const p of popups) if (p.life > 0) {
+    ctx.globalAlpha = Math.min(1, p.life / 0.3);
+    text(p.text, p.x, p.y, 18, "center", "bold", p.color);
+  }
+  ctx.globalAlpha = 1;
+}
+function clearFx() {
+  for (const p of particles) p.life = 0;
+  for (const p of popups) p.life = 0;
+  shakeTime = 0; shakePower = 0;
+  for (const b of buttons) { b.down = false; b.pid = null; }
+}
+// 화면이 좁으면 글자를 줄이되 14px 밑으로는 안 내려가요
+function fitSize(size) { return Math.max(14, Math.round(size * Math.min(1, W / 420))); }
+function drawTitle(title, howto) {
+  text(title, W / 2, H / 2 - 30, fitSize(36), "center", "bold");
+  text(howto, W / 2, H / 2 + 10, fitSize(16));
+  text("탭하거나 스페이스를 눌러 시작", W / 2, H / 2 + 50, fitSize(16), "center", "bold", "#f59e0b");
+}
+function drawOver(score, best) {
+  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, W, H);
+  text("게임 끝", W / 2, H / 2 - 40, fitSize(32), "center", "bold");
+  text(`점수 ${score} · 최고 ${best}`, W / 2, H / 2, fitSize(18));
+  text("탭하거나 스페이스를 눌러 다시 하기", W / 2, H / 2 + 44, fitSize(16), "center", "bold", "#f59e0b");
+}
 
 /* ===== 게임 상태 ===== */
 let state = "title"; // title | play | over
@@ -187,6 +289,7 @@ function placeDot() { dot = { x: 30 + Math.random() * (W - 60), y: 60 + Math.ran
 function startGame() {
   if (state === "over") GameSDK.newRound();
   state = "play"; score = 0; timeLeft = 20;
+  clearFx(); // 다시 하기 때 이전 판의 효과·버튼 상태를 깨끗이 지워요
   player.x = W / 2; player.y = H / 2;
   placeDot();
   beep(660, 0.1);
@@ -197,9 +300,11 @@ function endGame() {
   best = Math.max(best, score);
   GameSDK.submitScore(score);
   beep(220, 0.3, "sawtooth");
+  shake(8, 0.25);
 }
 
 function update(dt) {
+  updateFx(dt);
   if (state !== "play") return;
   const speed = 320;
   let vx = 0, vy = 0;
@@ -210,30 +315,30 @@ function update(dt) {
   if (pointer.down) { const dx = pointer.x - player.x, dy = pointer.y - player.y, d = Math.hypot(dx, dy); if (d > 4) { vx = dx / d; vy = dy / d; } }
   player.x = Math.max(player.r, Math.min(W - player.r, player.x + vx * speed * dt));
   player.y = Math.max(player.r, Math.min(H - player.r, player.y + vy * speed * dt));
-  if (Math.hypot(dot.x - player.x, dot.y - player.y) < player.r + 10) { score++; placeDot(); beep(880 + score * 20, 0.06); }
+  if (Math.hypot(dot.x - player.x, dot.y - player.y) < player.r + 10) {
+    score++; burst(dot.x, dot.y, "#f59e0b", 12); popup(dot.x, dot.y - 16, "+1"); shake(3, 0.08);
+    placeDot(); beep(880 + score * 20, 0.06);
+  }
   timeLeft -= dt;
   if (timeLeft <= 0) endGame();
 }
 
 function draw() {
   ctx.fillStyle = "#1b1b1f"; ctx.fillRect(0, 0, W, H);
+  beginShake();
   if (state === "play" || state === "over") {
     ctx.fillStyle = "#f59e0b"; ctx.beginPath(); ctx.arc(dot.x, dot.y, 10, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2); ctx.fill();
+  }
+  endShake();
+  drawFx();
+  drawButtons();
+  if (state === "play" || state === "over") {
     text(`점수 ${score}`, 16, 32, 20, "left");
     text(`${Math.ceil(Math.max(0, timeLeft))}초`, W / 2, 32, 20);
   }
-  if (state === "title") {
-    text("게임 제목", W / 2, H / 2 - 30, 36, "center", "bold");
-    text("방향키나 손가락으로 점을 모아요", W / 2, H / 2 + 10, 16);
-    text("탭하거나 스페이스를 눌러 시작", W / 2, H / 2 + 50, 16, "center", "bold", "#f59e0b");
-  }
-  if (state === "over") {
-    ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, W, H);
-    text("게임 끝", W / 2, H / 2 - 40, 32, "center", "bold");
-    text(`점수 ${score} · 최고 ${best}`, W / 2, H / 2, 18);
-    text("탭하거나 스페이스를 눌러 다시 하기", W / 2, H / 2 + 44, 16, "center", "bold", "#f59e0b");
-  }
+  if (state === "title") drawTitle("게임 제목", "방향키나 손가락으로 점을 모아요");
+  if (state === "over") drawOver(score, best);
 }
 // ---- 여기까지 ----
 

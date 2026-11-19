@@ -7,6 +7,8 @@
 //        node scripts/check-game.mjs games/<slug> --no-thumbnail    (thumbnail.png를 새로 찍지 않아요)
 //
 // 통과하면 플레이 중 화면을 games/<slug>/thumbnail.png 로 저장해요 (800×600, 카드 비율 4:3).
+// 휴대폰 스크린샷은 CSS 픽셀 크기(390×844, 844×390)로 저장해요. 화면은 고해상도로 그리되,
+// 에이전트가 Read로 볼 때 이미지가 4배 커지지 않게 하려는 거예요.
 // 끝나면 결과를 출력하고, 통과면 종료 코드 0, 실패면 1이에요.
 
 import { createServer } from "node:http";
@@ -249,7 +251,7 @@ async function runBrowserChecks() {
     const report = watch(page, "휴대폰 세로");
     await page.goto(hostUrl(1), { waitUntil: "load" });
     await page.waitForTimeout(1500);
-    const start = await page.screenshot({ path: join(outDir, "mobile-start.png") });
+    const start = await page.screenshot({ path: join(outDir, "mobile-start.png"), scale: "css" });
     shots.mobileStart = join(outDir, "mobile-start.png");
     if (isBlank(start)) fail("[휴대폰 세로] 시작 화면이 비어 있어요");
 
@@ -261,7 +263,7 @@ async function runBrowserChecks() {
       await page.touchscreen.tap(side === 0 ? 60 : side === 1 ? 330 : 195, 300 + rand(450));
       await page.waitForTimeout(80 + rand(160));
       if (!mid && Date.now() - t0 > 2500) {
-        mid = await page.screenshot({ path: join(outDir, "mobile-play.png") });
+        mid = await page.screenshot({ path: join(outDir, "mobile-play.png"), scale: "css" });
         shots.mobilePlay = join(outDir, "mobile-play.png");
       }
     }
@@ -281,7 +283,7 @@ async function runBrowserChecks() {
     await page.waitForTimeout(1200);
     await page.touchscreen.tap(422, 195);
     await page.waitForTimeout(1500);
-    await page.screenshot({ path: join(outDir, "mobile-landscape.png") });
+    await page.screenshot({ path: join(outDir, "mobile-landscape.png"), scale: "css" });
     shots.mobileLandscape = join(outDir, "mobile-landscape.png");
     await checkLayout(page, "휴대폰 가로");
     report();
