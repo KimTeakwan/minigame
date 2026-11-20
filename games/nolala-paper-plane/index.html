@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>휘리릭 노라라 종이비행기 멀리 날리기</title>
+<style>
+  /* 창을 꽉 채우고 스크롤·선택·길게 누르기 메뉴를 막아요 */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #8FD3FF; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #mute {
+    position: fixed; top: 10px; right: 10px; width: 40px; height: 40px; border: 0; border-radius: 10px;
+    background: rgba(255,255,255,.14); color: #fff; font-size: 18px; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="mute" aria-label="소리 끄기">🔊</button>
+<script>
+/* ===== 게임 SDK: 리더보드 + 멀티 (public/sdk.js와 같은 코드. 지우지 마세요) ===== */
+/* 멀티 게임 쓰는 법은 games/README.md의 "멀티 게임"을 보세요 */
+(function () {
+  var sent = false;
+  var standalone = window.parent === window; // 파일을 직접 열었을 때
+  var listeners = { message: [], players: [], emote: [], error: [] };
+  var room = { joined: false, roomId: null, me: null, players: [], hostId: null, maxPlayers: 0 };
+  var waiting = [];
+
+  function post(msg) {
+    if (!standalone) window.parent.postMessage(msg, "*");
+  }
+  function emit(name, a, b) {
+    var list = listeners[name] || [];
+    for (var i = 0; i < list.length; i++) {
+      try { list[i](a, b); } catch (e) { setTimeout(function () { throw e; }); }
+    }
+  }
+  function settle(ok, value) {
+    var list = waiting;
+    waiting = [];
+    for (var i = 0; i < list.length; i++) {
+      clearTimeout(list[i].timer);
+      ok ? list[i].resolve(value) : list[i].reject(new Error(value));
+    }
+  }
+
+  window.addEventListener("message", function (event) {
+    if (standalone || event.source !== window.parent) return; // 바깥 플레이 페이지에서 온 것만
+    var m = event.data;
+    if (!m || typeof m !== "object") return;
+    if (m.type === "GAMESDK_MP_JOINED") {
+      room = { joined: true, roomId: m.roomId, me: m.me, players: m.players || [], hostId: m.hostId, maxPlayers: m.maxPlayers };
+      settle(true, { roomId: room.roomId, me: room.me, players: room.players, hostId: room.hostId, maxPlayers: room.maxPlayers });
+      emit("players", room.players, room.hostId);
+    } else if (m.type === "GAMESDK_MP_PLAYERS") {
+      room.players = m.players || [];
+      room.hostId = m.hostId;
+      emit("players", room.players, room.hostId);
+    } else if (m.type === "GAMESDK_MP_MESSAGE") {
+      emit("message", m.data, m.from);
+    } else if (m.type === "GAMESDK_MP_EMOTE") {
+      emit("emote", m.key, m.from);
+    } else if (m.type === "GAMESDK_MP_ERROR") {
+      if (!room.joined) settle(false, m.message);
+      emit("error", m.message);
+    }
+  });
+
+  window.GameSDK = {
+    submitScore: function (score) {
+      if (sent) return; // 한 판에 한 번만
+      if (typeof score !== "number" || !isFinite(score)) return;
+      sent = true;
+      post({ type: "GAMESDK_SCORE", score: score });
+    },
+    // 새 판을 시작할 때 부르면 다시 점수를 보낼 수 있어요.
+    newRound: function () {
+      sent = false;
+      post({ type: "GAMESDK_NEW_ROUND" });
+    },
+    multi: {
+      join: function () {
+        return new Promise(function (resolve, reject) {
+          if (standalone) return reject(new Error("사이트 밖에서는 멀티를 쓸 수 없어요"));
+          var w = { resolve: resolve, reject: reject, timer: 0 };
+          w.timer = setTimeout(function () {
+            waiting = waiting.filter(function (x) { return x !== w; });
+            reject(new Error("방에 들어가지 못했어요 (응답 없음)"));
+          }, 8000);
+          waiting.push(w);
+          post({ type: "GAMESDK_MP_JOIN" });
+        });
+      },
+      send: function (data) { if (room.joined) post({ type: "GAMESDK_MP_SEND", data: data }); },
+      emote: function (key) { if (room.joined) post({ type: "GAMESDK_MP_EMOTE", key: key }); },
+      lock: function (locked) { if (room.joined) post({ type: "GAMESDK_MP_LOCK", locked: locked !== false }); },
+      leave: function () {
+        if (!room.joined) return;
+        room = { joined: false, roomId: null, me: null, players: [], hostId: null, maxPlayers: 0 };
+        post({ type: "GAMESDK_MP_LEAVE" });
+      },
+      on: function (name, fn) { if (listeners[name] && typeof fn === "function") listeners[name].push(fn); },
+      me: function () { return room.me; },
+      players: function () { return room.players.slice(); },
+      hostId: function () { return room.hostId; },
+      isHost: function () { return !!room.me && room.me.id === room.hostId; },
+    },
+  };
+})();
+
+/* ===== 화면 크기 (고해상도 화면 대응) ===== */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* ===== 소리 (Web Audio로 직접 만들어요. 첫 입력 뒤에 켜져요) ===== */
+let audio = null, muted = false;
+function beep(freq, dur = 0.08, type = "square", vol = 0.08) {
+  if (!audio || muted) return;
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, audio.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + dur);
+  o.connect(g).connect(audio.destination);
+  o.start(); o.stop(audio.currentTime + dur);
+}
+function unlockAudio() {
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audio = null; } }
+  if (audio && audio.state === "suspended") audio.resume();
+}
+const muteBtn = document.getElementById("mute");
+muteBtn.addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+  muted = !muted;
+  muteBtn.textContent = muted ? "🔇" : "🔊";
+  muteBtn.setAttribute("aria-label", muted ? "소리 켜기" : "소리 끄기");
+  muteBtn.blur(); // 스페이스로 음소거가 눌리지 않게 해요
+});
+muteBtn.tabIndex = -1;
+muteBtn.addEventListener("click", (e) => e.stopPropagation());
+
+/* ===== 입력 (키보드 + 터치/마우스) ===== */
+const keys = new Set();
+const pointer = { down: false, x: 0, y: 0 };
+window.addEventListener("keydown", (e) => {
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "Space"].includes(e.key)) e.preventDefault();
+  if (!keys.has(e.key)) onPress(e.key);
+  keys.add(e.key);
+});
+window.addEventListener("keyup", (e) => keys.delete(e.key));
+canvas.addEventListener("pointerdown", (e) => {
+  if (e.target !== canvas) return;
+  pointer.down = true; pointer.x = e.clientX; pointer.y = e.clientY;
+  onPress("pointer");
+});
+canvas.addEventListener("pointermove", (e) => { pointer.x = e.clientX; pointer.y = e.clientY; });
+window.addEventListener("pointerup", () => { pointer.down = false; });
+window.addEventListener("pointercancel", () => { pointer.down = false; });
+
+/* ===== 부품 상자 (파티클·팝업·흔들림) ===== */
+const MAX_PARTICLES = 120, MAX_POPUPS = 12;
+const particles = []; let particleNext = 0; // 미리 만든 객체를 돌려 써요 (매 프레임 새로 만들지 않아요)
+const popups = []; let popupNext = 0;
+for (let i = 0; i < MAX_PARTICLES; i++) particles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, color: "#fff", size: 3 });
+for (let i = 0; i < MAX_POPUPS; i++) popups.push({ x: 0, y: 0, life: 0, text: "", color: "#fff" });
+function burst(x, y, color = "#fff", n = 10, speed = 180) {
+  for (let i = 0; i < n; i++) {
+    const p = particles[particleNext]; particleNext = (particleNext + 1) % MAX_PARTICLES;
+    const a = Math.random() * Math.PI * 2, v = speed * (0.4 + Math.random() * 0.6);
+    p.x = x; p.y = y; p.vx = Math.cos(a) * v; p.vy = Math.sin(a) * v;
+    p.max = p.life = 0.35 + Math.random() * 0.3; p.color = color; p.size = 2 + Math.random() * 3;
+  }
+}
+function popup(x, y, s, color = "#fff") {
+  const p = popups[popupNext]; popupNext = (popupNext + 1) % MAX_POPUPS;
+  p.x = x; p.y = y; p.life = 0.7; p.text = s; p.color = color;
+}
+let shakeTime = 0, shakePower = 0;
+function shake(power = 6, time = 0.15) { shakePower = Math.max(shakePower, power); shakeTime = Math.max(shakeTime, time); }
+function updateFx(dt) {
+  for (const p of particles) if (p.life > 0) { p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 400 * dt; }
+  for (const p of popups) if (p.life > 0) { p.life -= dt; p.y -= 50 * dt; }
+  if (shakeTime > 0) { shakeTime -= dt; if (shakeTime <= 0) shakePower = 0; }
+}
+function beginShake() {
+  ctx.save();
+  if (shakeTime > 0) ctx.translate((Math.random() - 0.5) * 2 * shakePower, (Math.random() - 0.5) * 2 * shakePower);
+}
+function endShake() { ctx.restore(); }
+function drawFx() {
+  for (const p of particles) if (p.life > 0) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max); ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  for (const p of popups) if (p.life > 0) {
+    ctx.globalAlpha = Math.min(1, p.life / 0.3);
+    text(p.text, p.x, p.y, 18, "center", "bold", p.color);
+  }
+  ctx.globalAlpha = 1;
+}
+function clearFx() {
+  for (const p of particles) p.life = 0;
+  for (const p of popups) p.life = 0;
+  shakeTime = 0; shakePower = 0;
+}
+// 화면이 좁으면 글자를 줄이되 14px 밑으로는 안 내려가요
+function fitSize(size) { return Math.max(14, Math.round(size * Math.min(1, W / 420))); }
+
+/* ===== 게임 상수 (game.json 설명과 맞춰요) ===== */
+const THROWS = 5;                 // 한 판에 던지는 횟수
+const ANG_MIN = 10, ANG_MAX = 70; // 각도 범위(도)
+const PW_MIN = 0, PW_MAX = 100;   // 힘 범위
+const BEST_ANG = 35;              // 가장 멀리 가는 각도
+const AUTO_SEC = 5;               // 이 시간 안에 안 누르면 현재 값으로 확정
+const NAVY = "#1d3557", ORANGE = "#FF9F43", GRASS = "#7BD66B";
+// 던진 순서(0부터)별 난이도: 게이지 한쪽 끝에서 끝까지 걸리는 시간(초), 바람 최대 크기
+const GAUGE_SEC = [1.7, 1.7, 1.25, 1.25, 0.9];
+const WIND_MAX = [1, 1, 2, 2, 3];
+
+/* ===== 게임 상태 ===== */
+let state = "title"; // title | play | over
+let phase = "angle"; // angle | power | fly | result
+let score = 0, best = 0, prevBest = 0;
+let throwNo = 0, phaseT = 0, clock = 0, overT = 0, flashT = 0, resultT = 0, trailT = 0;
+let angle = ANG_MIN, power = PW_MIN, wind = 0, total = 0, longest = 0, lastDist = 0;
+const dists = [0, 0, 0, 0, 0];
+let fT = 0, fDur = 3, fDist = 0, fPeak = 5, camX = 0;
+let planeSX = 0, planeSY = 0, planeRot = 0;
+
+function tri(t, period) { const ph = (t / period) % 2; return ph < 1 ? ph : 2 - ph; }
+function gaugeVal(min, max, t) { return min + (max - min) * tri(t, GAUGE_SEC[throwNo]); }
+
+/* ===== 화면 배치 (매 프레임 계산, 새 객체는 안 만들어요) ===== */
+let groundY = 0, ppm = 10, ppmY = 10, ox = 0, uR = 20;
+function layout() {
+  groundY = Math.round(H * 0.7);
+  ppm = W / 40; ppmY = Math.max(4, (groundY - 100) / 18);
+  ox = W * 0.2; uR = Math.max(18, Math.min(W, H) * 0.06);
+}
+function sx(wx) { return ox + (wx - camX) * ppm; }
+function sy(h) { return groundY - h * ppmY; }
+
+/* ===== 소리 ===== */
+function sweep(f0, f1, dur, type = "sine", vol = 0.09) {
+  if (!audio || muted) return;
+  const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime;
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(audio.destination); o.start(); o.stop(t + dur);
+}
+
+/* ===== 흐름 ===== */
+function onPress() {
+  unlockAudio();
+  if (state === "title") return startGame();
+  if (state === "over") { if (overT > 0.5) startGame(); return; }
+  if (phase === "angle") lockStage();
+  else if (phase === "power") lockStage();
+}
+
+function newThrow() {
+  const m = WIND_MAX[throwNo];
+  wind = Math.floor(Math.random() * (2 * m + 1)) - m;
+  phase = "angle"; phaseT = 0; camX = 0; angle = ANG_MIN; power = PW_MIN;
+}
+
+function startGame() {
+  if (state === "over") GameSDK.newRound();
+  state = "play"; score = 0; total = 0; longest = 0; throwNo = 0; lastDist = 0;
+  for (let i = 0; i < THROWS; i++) dists[i] = 0;
+  clearFx(); newThrow();
+  beep(660, 0.1);
+}
+
+function lockStage() {
+  flashT = 0.3;
+  beep(phase === "angle" ? 880 : 1175, 0.07, "square", 0.1);
+  if (phase === "angle") { phase = "power"; phaseT = 0; burst(W / 2, H - 40, "#fff", 8, 120); return; }
+  burst(W / 2, H - 40, ORANGE, 10, 140);
+  // 날아갈 거리: 힘이 클수록, 각도가 35도에 가까울수록, 뒷바람일수록 멀리 가요
+  const af = 1 - 0.8 * Math.pow((angle - BEST_ANG) / 45, 2);
+  const wf = 1 + wind * 0.12;
+  fDist = Math.round((15 + power * 0.85) * af * wf * 10) / 10;
+  fDur = 2 + Math.min(2, fDist / 70);
+  fPeak = 2 + Math.min(14, fDist * 0.12) * (0.6 + 0.4 * Math.min(1.5, angle / BEST_ANG));
+  fT = 0; trailT = 0; phase = "fly";
+  sweep(300, 1200, 0.35, "sine", 0.1);
+}
+
+function endGame() {
+  state = "over"; overT = 0;
+  score = Math.round(total);
+  prevBest = best; best = Math.max(best, score);
+  GameSDK.submitScore(score);
+  beep(523, 0.15, "triangle", 0.1); setTimeout(() => beep(784, 0.25, "triangle", 0.1), 150);
+}
+
+function flightPos(p) { // 진행도 p(0~1)의 세계 좌표를 wx, wh에 담아요
+  const e = p * (1.3 - 0.3 * p);
+  flightPos.x = fDist * e;
+  flightPos.h = 1.5 * (1 - p) + fPeak * 4 * p * (1 - p);
+}
+flightPos.x = 0; flightPos.h = 0;
+
+function update(dt) {
+  clock += dt;
+  updateFx(dt);
+  if (flashT > 0) flashT -= dt;
+  if (state === "over") { overT += dt; return; }
+  if (state !== "play") return;
+  if (phase === "angle" || phase === "power") {
+    phaseT += dt;
+    if (phase === "angle") angle = gaugeVal(ANG_MIN, ANG_MAX, phaseT);
+    else power = gaugeVal(PW_MIN, PW_MAX, phaseT);
+    if (phaseT >= AUTO_SEC) lockStage(); // 5초가 지나면 현재 값으로 확정
+  } else if (phase === "fly") {
+    fT += dt;
+    const p = Math.min(1, fT / fDur);
+    flightPos(p);
+    const x0 = flightPos.x, h0 = flightPos.h;
+    flightPos(Math.min(1, p + 0.02));
+    planeRot = Math.atan2(-(flightPos.h - h0) * ppmY, (flightPos.x - x0) * ppm);
+    flightPos(p);
+    const target = Math.max(0, flightPos.x - W * 0.35 / ppm);
+    camX += (target - camX) * Math.min(1, dt * 8);
+    layout();
+    planeSX = sx(flightPos.x); planeSY = sy(flightPos.h);
+    trailT -= dt;
+    if (trailT <= 0) { trailT = 0.04; burst(planeSX - 8, planeSY, "#ffffff", 1, 25); }
+    if (p >= 1) {
+      phase = "result"; resultT = 1.5; lastDist = fDist;
+      dists[throwNo] = fDist; total = Math.round((total + fDist) * 10) / 10;
+      longest = Math.max(longest, fDist);
+      planeRot = 0.15;
+      burst(planeSX, groundY, "#c9a26b", 14, 140); shake(5, 0.2); beep(150, 0.15, "triangle", 0.12);
+    }
+  } else if (phase === "result") {
+    resultT -= dt;
+    if (resultT <= 0) {
+      if (throwNo >= THROWS - 1) endGame();
+      else { throwNo++; newThrow(); }
+    }
+  }
+}
+
+/* ===== 그리기 ===== */
+function text(s, x, y, size, align = "center", weight = "normal", color = "#fff") {
+  ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = "middle";
+  ctx.font = `${weight} ${size}px -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif`;
+  ctx.fillText(s, x, y);
+}
+function rrect(x, y, w, h, r) { ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h); }
+
+function drawPlane(x, y, rot, s) { // 그리기 하나로 비행기를 다 그려요
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  ctx.lineJoin = "round"; ctx.lineWidth = 2; ctx.strokeStyle = ORANGE;
+  ctx.fillStyle = "#ffffff";
+  ctx.beginPath(); ctx.moveTo(s, 0); ctx.lineTo(-s, -s * 0.55); ctx.lineTo(-s * 0.35, s * 0.05); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = "#dfe9f3";
+  ctx.beginPath(); ctx.moveTo(s, 0); ctx.lineTo(-s * 0.35, s * 0.05); ctx.lineTo(-s * 0.8, s * 0.45); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+
+function drawNolala(x, gy, r) {
+  ctx.fillStyle = "#ffffff"; ctx.strokeStyle = "#9db7cc"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(x, gy - r * 0.85, r * 1.05, r * 0.85, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, gy - r * 1.75, r * 0.8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = "#222";
+  ctx.beginPath(); ctx.arc(x - r * 0.28, gy - r * 1.8, r * 0.09, 0, Math.PI * 2); ctx.arc(x + r * 0.28, gy - r * 1.8, r * 0.09, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x, gy - r * 1.65, r * 0.11, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "rgba(255,130,130,.5)";
+  ctx.beginPath(); ctx.arc(x - r * 0.5, gy - r * 1.6, r * 0.13, 0, Math.PI * 2); ctx.arc(x + r * 0.5, gy - r * 1.6, r * 0.13, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawWorld() {
+  ctx.fillStyle = "#8FD3FF"; ctx.fillRect(0, 0, W, H);
+  // 구름 (카메라보다 천천히 움직여요)
+  ctx.fillStyle = "rgba(255,255,255,.75)";
+  for (let i = 0; i < 4; i++) {
+    const cx = (((i * 0.31 * W + 60 - camX * ppm * 0.3) % (W + 160)) + (W + 160)) % (W + 160) - 80;
+    const cy = H * (0.16 + 0.07 * ((i * 5) % 4)) + 30;
+    ctx.beginPath(); ctx.ellipse(cx, cy, 34, 12, 0, 0, Math.PI * 2); ctx.ellipse(cx + 18, cy - 8, 20, 11, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  // 바람 줄무늬
+  if (state === "play" && wind !== 0) {
+    ctx.strokeStyle = "rgba(255,255,255,.55)"; ctx.lineWidth = 2;
+    for (let i = 0; i < 6; i++) {
+      const y = H * 0.22 + i * (groundY - H * 0.3) / 6;
+      const x = (((i * 83 + clock * wind * 70) % (W + 60)) + (W + 60)) % (W + 60) - 30;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 26, y); ctx.stroke();
+    }
+  }
+  ctx.fillStyle = GRASS; ctx.fillRect(0, groundY, W, H - groundY);
+  ctx.fillStyle = "#5fbf55"; ctx.fillRect(0, groundY, W, 5);
+  // 10미터마다 깃발
+  const first = Math.max(1, Math.floor(camX / 10)), lastM = Math.ceil((camX + W / ppm) / 10);
+  for (let m = first; m <= lastM + 1; m++) {
+    const fx = sx(m * 10);
+    if (fx < -30 || fx > W + 30) continue;
+    ctx.strokeStyle = "#7a5b3a"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(fx, groundY); ctx.lineTo(fx, groundY - 24); ctx.stroke();
+    ctx.fillStyle = ORANGE; ctx.beginPath(); ctx.moveTo(fx, groundY - 24); ctx.lineTo(fx + 14, groundY - 19); ctx.lineTo(fx, groundY - 14); ctx.fill();
+    text(m * 10 + "m", fx, groundY + 17, 14, "center", "bold", NAVY);
+  }
+  // 노라라
+  drawNolala(sx(-3), groundY, uR);
+  const ps = Math.max(14, Math.min(W, H) * 0.045);
+  if (phase === "angle" || phase === "power") {
+    drawPlane(sx(-3) + uR * 1.1, groundY - uR * 1.5, -angle * Math.PI / 180, ps);
+  } else if (phase === "fly") {
+    drawPlane(planeSX, planeSY, planeRot, ps);
+  } else if (phase === "result" || state === "over") {
+    drawPlane(sx(lastDist), groundY - 4, planeRot, ps);
+  }
+}
+
+function drawHud() {
+  text(`던지기 ${Math.min(throwNo + 1, THROWS)}/${THROWS}`, 12, 24, 16, "left", "bold", NAVY);
+  text(`합계 ${total.toFixed(1)}m`, W - 58, 24, 16, "right", "bold", NAVY);
+  // 바람: 위 가운데
+  const wl = wind > 0 ? `뒷바람 +${wind}` : wind < 0 ? `맞바람 ${wind}` : "바람 없음 0";
+  text(wl, W / 2, 48, 16, "center", "bold", NAVY);
+  const ay = 66, len = Math.abs(wind) * 14;
+  ctx.strokeStyle = wind > 0 ? "#e8590c" : "#1971c2"; ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = 3;
+  if (wind === 0) { ctx.beginPath(); ctx.arc(W / 2, ay, 3, 0, Math.PI * 2); ctx.fill(); }
+  else {
+    const d = wind > 0 ? 1 : -1, x0 = W / 2 - d * len / 2, x1 = W / 2 + d * len / 2;
+    ctx.beginPath(); ctx.moveTo(x0, ay); ctx.lineTo(x1, ay); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x1 + d * 7, ay); ctx.lineTo(x1 - d * 3, ay - 6); ctx.lineTo(x1 - d * 3, ay + 6); ctx.fill();
+  }
+}
+
+function drawGauge() {
+  if (state !== "play" || (phase !== "angle" && phase !== "power")) return; // 한 번에 하나만
+  const gw = Math.min(W - 24, 360), gx = (W - gw) / 2, gh = 22, gy = H - 38;
+  ctx.fillStyle = "rgba(29,53,87,.82)"; rrect(gx - 8, gy - 34, gw + 16, gh + 44, 12); ctx.fill();
+  const isA = phase === "angle";
+  const v = isA ? angle : power, frac = isA ? (angle - ANG_MIN) / (ANG_MAX - ANG_MIN) : power / (PW_MAX - PW_MIN);
+  const left = isA ? `1단계 각도 ${Math.round(v)}도` : `2단계 힘 ${Math.round(v)}`;
+  text(left, gx, gy - 16, 15, "left", "bold");
+  text(`${Math.max(1, Math.ceil(AUTO_SEC - phaseT))}초`, gx + gw, gy - 16, 15, "right", "bold", "#ffd8a8");
+  ctx.fillStyle = "#33496b"; rrect(gx, gy, gw, gh, 8); ctx.fill();
+  if (isA) { // 35도 근처를 초록으로 알려줘요
+    const a = (BEST_ANG - 5 - ANG_MIN) / (ANG_MAX - ANG_MIN), b = (BEST_ANG + 5 - ANG_MIN) / (ANG_MAX - ANG_MIN);
+    ctx.fillStyle = "rgba(123,214,107,.55)"; ctx.fillRect(gx + gw * a, gy, gw * (b - a), gh);
+  } else {
+    ctx.fillStyle = frac > 0.8 ? "#ff6b6b" : ORANGE; rrect(gx, gy, Math.max(8, gw * frac), gh, 8); ctx.fill();
+  }
+  ctx.fillStyle = flashT > 0 ? "#fff" : "#ffd43b"; ctx.fillRect(gx + gw * frac - 3, gy - 4, 6, gh + 8);
+}
+
+function drawResult() {
+  if (state !== "play" || phase !== "result") return;
+  const bw = Math.min(220, W - 24), bh = 78, bx = W / 2 - bw / 2, by = H * 0.38 - bh / 2;
+  ctx.fillStyle = "rgba(29,53,87,.88)"; rrect(bx, by, bw, bh, 14); ctx.fill();
+  const k = 1 + 0.15 * Math.max(0, Math.min(1, (resultT - 1.2) / 0.3));
+  text(`${lastDist.toFixed(1)}m`, W / 2, by + 30, Math.round(32 * k), "center", "bold", "#fff");
+  text(`${throwNo + 1}번째 비행이 끝났어요`, W / 2, by + 60, 14, "center", "normal", "#ffd8a8");
+}
+
+function drawTitleScreen() {
+  ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fillRect(0, 0, W, H);
+  const cy = H / 2, s = Math.max(14, Math.round(36 * Math.min(1, W / 420)));
+  drawPlane(W / 2, cy - s * 2.6 + Math.sin(clock * 3) * 5, -0.3, Math.max(22, s * 1.1));
+  text("휘리릭 노라라", W / 2, cy - s * 0.9, s, "center", "bold", NAVY);
+  text("종이비행기 멀리 날리기", W / 2, cy + s * 0.4, Math.round(s * 0.62), "center", "bold", NAVY);
+  text("바람을 보고 두 번 눌러 각도와 힘을 정해요", W / 2, cy + s * 1.6, fitSize(16), "center", "normal", NAVY);
+  text("탭하거나 스페이스를 눌러 시작", W / 2, cy + s * 2.5, fitSize(16), "center", "bold", "#e8590c");
+}
+
+function drawOverScreen() {
+  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, W, H);
+  const cy = H / 2, k = 1 + 0.1 * Math.sin(clock * 6);
+  text("비행 끝!", W / 2, cy - 72, fitSize(28), "center", "bold");
+  text(`점수 ${score}m`, W / 2, cy - 34, Math.round(fitSize(36) * k), "center", "bold", "#ffd43b");
+  text(`최고 점수 ${best}m`, W / 2, cy, 16, "center", "normal");
+  text(`가장 멀리 날린 거리 ${longest.toFixed(1)}m`, W / 2, cy + 24, 16, "center", "normal");
+  if (score > prevBest) text("★ 최고 기록! ★", W / 2, cy + 50, 18, "center", "bold", "#ffd43b");
+  text("탭하거나 스페이스를 눌러 다시 하기", W / 2, cy + 82, fitSize(16), "center", "bold", ORANGE);
+}
+
+function draw() {
+  layout();
+  beginShake();
+  drawWorld();
+  endShake();
+  drawFx();
+  if (state !== "title") drawHud();
+  drawGauge();
+  drawResult();
+  if (state === "title") drawTitleScreen();
+  if (state === "over") drawOverScreen();
+}
+
+/* ===== 메인 루프 (프레임 사이 시간이 길어져도 한 번에 0.05초까지만 진행) ===== */
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (window.innerWidth !== W || window.innerHeight !== H) resize();
+  layout();
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
