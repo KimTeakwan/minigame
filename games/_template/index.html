@@ -13,7 +13,7 @@
   }
   canvas { display: block; width: 100vw; height: 100vh; }
   #mute {
-    position: fixed; top: 10px; right: 10px; width: 40px; height: 40px; border: 0; border-radius: 10px;
+    position: fixed; top: 8px; right: 8px; width: 48px; height: 48px; border: 0; border-radius: 12px;
     background: rgba(255,255,255,.14); color: #fff; font-size: 18px; cursor: pointer;
   }
 </style>
@@ -233,6 +233,10 @@ function updateFx(dt) {
 }
 function beginShake() {
   ctx.save();
+  if (director.zoomT > 0) { // zoomPunch(): 화면 가운데를 기준으로 살짝 확대했다가 돌아와요
+    const z = 1 + (director.zoom - 1) * ease.outCubic(director.zoomT / director.zoomMax);
+    ctx.translate(W / 2, H / 2); ctx.scale(z, z); ctx.translate(-W / 2, -H / 2);
+  }
   if (shakeTime > 0) ctx.translate((Math.random() - 0.5) * 2 * shakePower, (Math.random() - 0.5) * 2 * shakePower);
 }
 function endShake() { ctx.restore(); }
@@ -256,17 +260,264 @@ function clearFx() {
 }
 // 화면이 좁으면 글자를 줄이되 14px 밑으로는 안 내려가요
 function fitSize(size) { return Math.max(14, Math.round(size * Math.min(1, W / 420))); }
-function drawTitle(title, howto) {
-  text(title, W / 2, H / 2 - 30, fitSize(36), "center", "bold");
-  text(howto, W / 2, H / 2 + 10, fitSize(16));
-  text("탭하거나 스페이스를 눌러 시작", W / 2, H / 2 + 50, fitSize(16), "center", "bold", "#f59e0b");
+// 제목이 카드보다 길면 글자를 줄여요 (16px까지). 그래도 길면 제목을 짧게 하거나 두 줄로 나눠요.
+function fitTitle(s, size, maxW) {
+  ctx.font = `bold ${size}px ${FONT}`;
+  while (size > 16 && ctx.measureText(s).width > maxW) { size -= 2; ctx.font = `bold ${size}px ${FONT}`; }
+  return size;
 }
-function drawOver(score, best) {
-  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, W, H);
-  text("게임 끝", W / 2, H / 2 - 40, fitSize(32), "center", "bold");
-  text(`점수 ${score} · 최고 ${best}`, W / 2, H / 2, fitSize(18));
-  text("탭하거나 스페이스를 눌러 다시 하기", W / 2, H / 2 + 44, fitSize(16), "center", "bold", "#f59e0b");
+// 시작 화면 카드. 뒤에 움직이는 장면(배경·캐릭터)을 먼저 그리고 이걸 위에 올려요. y는 카드 가운데 높이(기본 화면 가운데).
+function drawTitle(title, howto, y = H / 2) {
+  const w = Math.min(W - 32, 440), h = fitSize(170), x = (W - w) / 2, top = y - h / 2;
+  panel(x, top, w, h, "#fffaf0");
+  textOutline(title, W / 2, top + h * 0.27, fitTitle(title, fitSize(34), w - 32), "#ff6f91", "#ffffff");
+  text(howto, W / 2, top + h * 0.56, fitSize(16), "center", "normal", "#3b3b46");
+  const blink = 0.65 + 0.35 * Math.sin(performance.now() / 260);
+  ctx.globalAlpha = blink;
+  text("탭하거나 스페이스를 눌러 시작", W / 2, top + h * 0.8, fitSize(16), "center", "bold", "#e07b00");
+  ctx.globalAlpha = 1;
 }
+// 결과 화면 카드. lines에 이번 판 기록 2~3줄(예: "도달 스테이지 3", "최고 콤보 27")을 넣어요.
+function drawOver(score, best, lines = [], title = "게임 끝") {
+  ctx.fillStyle = "rgba(10,10,20,.45)"; ctx.fillRect(0, 0, W, H);
+  const lh = fitSize(24), w = Math.min(W - 32, 420), h = fitSize(150) + lines.length * lh, x = (W - w) / 2, top = (H - h) / 2;
+  panel(x, top, w, h, "#fffaf0");
+  textOutline(title, W / 2, top + fitSize(34), fitTitle(title, fitSize(30), w - 32), "#ff6f91", "#ffffff");
+  text(`점수 ${score} · 최고 ${best}`, W / 2, top + fitSize(72), fitSize(20), "center", "bold", "#2b2b33");
+  for (let i = 0; i < lines.length; i++) text(lines[i], W / 2, top + fitSize(100) + i * lh, fitSize(15), "center", "normal", "#5b5b66");
+  text("탭하거나 스페이스를 눌러 다시 하기", W / 2, top + h - fitSize(24), fitSize(16), "center", "bold", "#e07b00");
+}
+
+/* ===== 그림·연출·소리 도구 (대작 기준. games/README.md "대작 기준"을 채울 때 써요) =====
+   색      shade("#ff8fb1", -0.3) 30% 어둡게 / shade(c, 0.3) 30% 밝게,  mix("#ff0000", "#0000ff", 0.5)
+   배경    sky(["#8fd3ff", "#e8f7ff"])                위→아래 그라데이션 (색·높이가 같으면 다시 안 만들어요)
+           clouds(scrollX * 0.15, 4)                  구름 (먼 겹일수록 scrollX에 작은 수를 곱해요 → 패럴랙스)
+           hills(scrollX * 0.3, H * 0.75, 50, "#9be38a", 1)   언덕 실루엣 (seed를 바꾸면 모양이 달라져요)
+   모양    blob(x, y, rx, ry, "#ff8fb1", { rot, outline, highlight })   그늘·하이라이트·외곽선이 있는 둥근 몸
+           rrect(x, y, w, h, r, "#ffd84d", { outline })                윗면 밝게·아랫면 어둡게·외곽선 있는 상자
+           groundShadow(x, footY, w)  발밑 그림자      eyes(x, y, size, lookX, lookY, blink)  눈 두 개
+           panel(x, y, w, h, fill)    그림자 있는 카드  textOutline(s, x, y, size, color, outline)  테두리 글자
+   움직임  const sq = squash();  sq.kick(0.3) 늘어남 / sq.kick(-0.3) 눌림 → update에서 sq.update(dt)
+           그릴 때 beginSquash(x, footY, sq); ...그리기...; ctx.restore();
+           ease.outCubic(t) ease.outBack(t) ease.inOut(t), lerp(a, b, t), clamp(v, a, b), frameAt(t, fps, n)
+   연출    hitStop(0.06) 순간 멈춤, flash("#fff", 0.15) 화면 번쩍, zoomPunch(1.06, 0.2) 살짝 확대,
+           banner("2스테이지", "바람이 불어요!", 1.8) 스테이지 안내 띠
+           update 맨 앞에서 const gdt = updateDirector(dt); → 게임 움직임은 gdt로 (멈춤 중엔 0)
+           draw에서 drawFx() 다음에 drawDirector()
+   소리    sfx.jump() sfx.coin() sfx.hit() sfx.clear() sfx.whoosh() sfx.click()
+           tone(주파수, 길이, "square"|"triangle"|"sine"|"sawtooth", 크기, 끝주파수, 몇초뒤) / noise(길이, 크기, 몇초뒤, 고역필터)
+           music.start(SONG) / music.stop()  — SONG은 아래 예시처럼 16칸 반복 곡 (숫자는 음 번호, 60 = 가운데 도, 0은 쉼)
+   그리는 순서: sky → clouds·hills(먼 것부터) → 게임 → drawFx → drawDirector → 점수판(HUD) → drawButtons */
+const FONT = '-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif';
+const TAU = Math.PI * 2;
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const ease = {
+  outCubic: (t) => 1 - Math.pow(1 - t, 3),
+  inOut: (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2),
+  outBack: (t) => 1 + 2.70158 * Math.pow(t - 1, 3) + 1.70158 * Math.pow(t - 1, 2),
+};
+function frameAt(t, fps, n) { return Math.floor(t * fps) % n; }
+
+function hexToRgb(c) {
+  const n = parseInt(c.slice(1), 16);
+  return c.length === 4 ? [((n >> 8) & 15) * 17, ((n >> 4) & 15) * 17, (n & 15) * 17] : [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function rgbToHex(r, g, b) { return "#" + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1); }
+const shadeCache = new Map();
+function shade(c, amt) {
+  const k = c + amt;
+  let v = shadeCache.get(k);
+  if (v) return v;
+  const [r, g, b] = hexToRgb(c);
+  const f = (x) => clamp(Math.round(amt < 0 ? x * (1 + amt) : x + (255 - x) * amt), 0, 255);
+  v = rgbToHex(f(r), f(g), f(b));
+  shadeCache.set(k, v);
+  return v;
+}
+function mix(a, b, t) {
+  const A = hexToRgb(a), B = hexToRgb(b);
+  return rgbToHex(Math.round(lerp(A[0], B[0], t)), Math.round(lerp(A[1], B[1], t)), Math.round(lerp(A[2], B[2], t)));
+}
+
+let skyKey = "", skyGrad = null;
+function sky(colors) {
+  const key = colors.join() + H;
+  if (key !== skyKey) {
+    skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+    for (let i = 0; i < colors.length; i++) skyGrad.addColorStop(i / Math.max(1, colors.length - 1), colors[i]);
+    skyKey = key;
+  }
+  ctx.fillStyle = skyGrad; ctx.fillRect(0, 0, W, H);
+}
+function circ(x, y, r) { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, TAU); }
+function clouds(offset, count = 4, color = "#ffffff", yTop = 0.08, yBottom = 0.38) {
+  const span = W + 240;
+  ctx.fillStyle = color; ctx.globalAlpha = 0.85;
+  ctx.beginPath();
+  for (let i = 0; i < count; i++) {
+    const sx = ((i * 397 + 113) % 1000) / 1000, sy = ((i * 211 + 59) % 1000) / 1000, s = 0.7 + sy * 0.6;
+    const x = (((sx * span - offset) % span) + span) % span - 120, y = H * lerp(yTop, yBottom, sy);
+    circ(x, y, 22 * s); circ(x + 26 * s, y - 10 * s, 27 * s); circ(x + 54 * s, y, 21 * s); circ(x + 27 * s, y + 6 * s, 20 * s);
+  }
+  ctx.fill(); ctx.globalAlpha = 1;
+}
+function hills(offset, baseY, amp, color, seed = 1) {
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.moveTo(0, H);
+  for (let x = 0; x <= W + 16; x += 16) {
+    const t = (x + offset) * 0.004;
+    ctx.lineTo(x, baseY - amp * (0.55 + 0.3 * Math.sin(t * 1.3 + seed) + 0.15 * Math.sin(t * 3.1 + seed * 2.7)));
+  }
+  ctx.lineTo(W + 16, H); ctx.closePath(); ctx.fill();
+}
+function blob(x, y, rx, ry, fill, o = {}) {
+  const lw = o.outline === undefined ? Math.max(2, Math.min(rx, ry) * 0.12) : o.outline;
+  ctx.save(); ctx.translate(x, y); if (o.rot) ctx.rotate(o.rot);
+  ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, TAU);
+  ctx.fillStyle = shade(fill, -0.22); ctx.fill();
+  ctx.save(); ctx.clip();
+  ctx.beginPath(); ctx.ellipse(-rx * 0.08, -ry * 0.14, rx, ry, 0, 0, TAU); ctx.fillStyle = fill; ctx.fill();
+  ctx.restore();
+  if (o.highlight !== false) {
+    ctx.globalAlpha = 0.6; ctx.fillStyle = "#ffffff";
+    ctx.beginPath(); ctx.ellipse(-rx * 0.38, -ry * 0.48, rx * 0.22, ry * 0.13, -0.6, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  if (lw > 0) {
+    ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, TAU);
+    ctx.lineWidth = lw; ctx.strokeStyle = o.line || shade(fill, -0.5); ctx.stroke();
+  }
+  ctx.restore();
+}
+function rrectPath(x, y, w, h, r) { ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h); }
+function rrect(x, y, w, h, r, fill, o = {}) {
+  rrectPath(x, y, w, h, r); ctx.fillStyle = fill; ctx.fill();
+  ctx.save(); ctx.clip();
+  ctx.fillStyle = shade(fill, -0.18); ctx.fillRect(x, y + h * 0.8, w, h * 0.2);
+  ctx.fillStyle = shade(fill, 0.25); ctx.fillRect(x, y, w, Math.max(2, h * 0.1));
+  ctx.restore();
+  const lw = o.outline === undefined ? 2.5 : o.outline;
+  if (lw > 0) { rrectPath(x, y, w, h, r); ctx.lineWidth = lw; ctx.strokeStyle = o.line || shade(fill, -0.5); ctx.stroke(); }
+}
+function groundShadow(x, y, w, alpha = 0.22) {
+  ctx.globalAlpha = alpha; ctx.fillStyle = "#000000";
+  ctx.beginPath(); ctx.ellipse(x, y, w / 2, w * 0.14, 0, 0, TAU); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+function eyes(x, y, size, lookX = 0, lookY = 0, blink = 0, gap = size * 1.1) {
+  for (let i = 0; i < 2; i++) {
+    const ex = x + (i ? 1 : -1) * gap / 2;
+    if (blink > 0.5) {
+      ctx.strokeStyle = "#2b2b33"; ctx.lineWidth = Math.max(2, size * 0.18); ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(ex - size * 0.35, y); ctx.lineTo(ex + size * 0.35, y); ctx.stroke();
+      continue;
+    }
+    const px = ex + lookX * size * 0.15, py = y + lookY * size * 0.15;
+    ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.ellipse(ex, y, size * 0.42, size * 0.5, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#2b2b33"; ctx.beginPath(); ctx.arc(px, py, size * 0.26, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.arc(px - size * 0.08, py - size * 0.1, size * 0.08, 0, TAU); ctx.fill();
+  }
+}
+function panel(x, y, w, h, fill = "#ffffff", o = {}) {
+  ctx.globalAlpha = 0.25; ctx.fillStyle = "#000000"; rrectPath(x + 4, y + 6, w, h, 18); ctx.fill(); ctx.globalAlpha = 1;
+  rrectPath(x, y, w, h, 18); ctx.fillStyle = fill; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = o.line || shade(fill, -0.35); ctx.stroke();
+}
+function textOutline(s, x, y, size, color = "#ffffff", outline = "#1b1b1f", align = "center") {
+  ctx.textAlign = align; ctx.textBaseline = "middle"; ctx.font = `bold ${size}px ${FONT}`;
+  ctx.lineJoin = "round"; ctx.lineWidth = Math.max(3, size * 0.2); ctx.strokeStyle = outline; ctx.strokeText(s, x, y);
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+function squash() {
+  return {
+    v: 0, vel: 0,
+    kick(a) { this.v = clamp(a, -0.6, 0.6); this.vel = 0; },
+    update(dt) { this.vel += (-300 * this.v - 12 * this.vel) * dt; this.v = clamp(this.v + this.vel * dt, -0.6, 0.6); },
+  };
+}
+// 발끝(footY)을 기준으로 늘어나고 눌려요. 다 그린 뒤 ctx.restore()를 불러요.
+function beginSquash(x, footY, sq) {
+  ctx.save(); ctx.translate(x, footY); ctx.scale(1 - sq.v * 0.6, 1 + sq.v); ctx.translate(-x, -footY);
+}
+
+const director = { stop: 0, flashT: 0, flashMax: 1, flashColor: "#ffffff", zoom: 1, zoomT: 0, zoomMax: 1, bannerT: 0, bannerMax: 1, bannerTitle: "", bannerSub: "" };
+function hitStop(t = 0.06) { director.stop = Math.max(director.stop, t); }
+function flash(color = "#ffffff", t = 0.15) { director.flashColor = color; director.flashT = director.flashMax = t; }
+function zoomPunch(z = 1.06, t = 0.2) { director.zoom = z; director.zoomT = director.zoomMax = t; }
+function banner(title, sub = "", t = 1.8) { director.bannerTitle = title; director.bannerSub = sub; director.bannerT = director.bannerMax = t; }
+function updateDirector(dt) {
+  if (director.flashT > 0) director.flashT -= dt;
+  if (director.zoomT > 0) director.zoomT -= dt;
+  if (director.bannerT > 0) director.bannerT -= dt;
+  if (director.stop > 0) { director.stop -= dt; return 0; }
+  return dt;
+}
+function clearDirector() { director.stop = director.flashT = director.zoomT = director.bannerT = 0; }
+function drawDirector() {
+  if (director.flashT > 0) {
+    ctx.globalAlpha = 0.6 * Math.max(0, director.flashT / director.flashMax);
+    ctx.fillStyle = director.flashColor; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1;
+  }
+  if (director.bannerT > 0) {
+    const p = 1 - director.bannerT / director.bannerMax, inT = Math.min(1, p / 0.18), outT = Math.min(1, (1 - p) / 0.18);
+    const h = director.bannerSub ? fitSize(84) : fitSize(56), y = Math.max(H * 0.3, 80 + h / 2), off = (1 - ease.outCubic(inT)) * W * 0.3; // 위쪽 70px 점수판은 가리지 않아요
+    ctx.globalAlpha = Math.max(0, Math.min(inT, outT));
+    ctx.fillStyle = "rgba(20,20,32,.72)"; ctx.fillRect(0, y - h / 2, W, h);
+    textOutline(director.bannerTitle, W / 2 + off, director.bannerSub ? y - h * 0.18 : y, fitSize(30), "#ffffff", "#1b1b1f");
+    if (director.bannerSub) text(director.bannerSub, W / 2 + off, y + h * 0.24, fitSize(16), "center", "bold", "#ffe08a");
+    ctx.globalAlpha = 1;
+  }
+}
+
+function tone(freq, dur = 0.1, type = "square", vol = 0.08, slideTo = 0, when = 0) {
+  if (!audio || muted) return;
+  const t = audio.currentTime + when, o = audio.createOscillator(), g = audio.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(audio.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+let noiseBuf = null;
+function noise(dur = 0.15, vol = 0.1, when = 0, highpass = 800) {
+  if (!audio || muted) return;
+  if (!noiseBuf) {
+    noiseBuf = audio.createBuffer(1, Math.floor(audio.sampleRate * 0.5), audio.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  const t = audio.currentTime + when, s = audio.createBufferSource(), f = audio.createBiquadFilter(), g = audio.createGain();
+  s.buffer = noiseBuf; f.type = "highpass"; f.frequency.value = highpass;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  s.connect(f).connect(g).connect(audio.destination); s.start(t); s.stop(t + dur);
+}
+const sfx = {
+  jump: () => tone(380, 0.16, "square", 0.05, 760),
+  coin: () => { tone(988, 0.07, "square", 0.045); tone(1319, 0.14, "square", 0.045, 0, 0.06); },
+  hit: () => { tone(170, 0.22, "sawtooth", 0.07, 60); noise(0.12, 0.09, 0, 300); },
+  clear: () => { for (let i = 0; i < 4; i++) tone([523, 659, 784, 1047][i], 0.18, "triangle", 0.07, 0, i * 0.09); },
+  whoosh: () => noise(0.25, 0.07, 0, 1500),
+  click: () => tone(660, 0.04, "square", 0.035),
+};
+function midi(n) { return 440 * Math.pow(2, (n - 69) / 12); }
+// 반복 곡: 박자마다 조금 앞서 음을 예약해요. 탭을 바꿨다 돌아오면 밀린 박자는 건너뛰어요.
+const music = {
+  on: false, song: null, step: 0, next: 0,
+  start(song) { this.song = song; this.on = true; this.step = 0; this.next = 0; },
+  stop() { this.on = false; },
+  update() {
+    if (!audio) return;
+    if (!this.on || muted || this.next < audio.currentTime) { this.next = audio.currentTime + 0.05; if (!this.on || muted) return; }
+    const sp = 60 / this.song.bpm / 4; // 한 칸 = 16분음표
+    while (this.next < audio.currentTime + 0.12) {
+      const i = this.step % this.song.steps, when = this.next - audio.currentTime, s = this.song;
+      if (s.bass && s.bass[i]) tone(midi(s.bass[i]), sp * 1.8, "triangle", 0.05, 0, when);
+      if (s.lead && s.lead[i]) tone(midi(s.lead[i]), sp * 0.9, s.type || "square", 0.022, 0, when);
+      if (s.drum && s.drum[i]) noise(0.05, 0.045, when, s.drum[i] > 1 ? 4000 : 1200);
+      this.step++; this.next += sp;
+    }
+  },
+};
 
 /* ===== 게임 상태 ===== */
 let state = "title"; // title | play | over
@@ -279,67 +530,150 @@ function onPress(key) {
   // 플레이 중 한 번 누르는 입력은 여기서 처리해요
 }
 
-// ---- 여기부터 게임마다 바꾸는 부분 (예시: 움직이는 점을 모아요) ----
-const player = { x: 0, y: 0, r: 14 };
-let dot = { x: 0, y: 0 };
-let timeLeft = 0;
+// ---- 여기부터 게임마다 바꾸는 부분 ----
+// 예시: 스테이지 3개짜리 별 모으기. 그림·연출·소리 도구 쓰는 법을 보여주는 뼈대예요.
+// 실제 게임은 games/README.md "대작 기준"(스테이지·보스나 이벤트·성장 요소·그림·연출·음악)을 채워요.
+const PAL = { pink: "#ff8fb1", star: "#ffd84d", cloud: "#8a8fa8" }; // 게임마다 팔레트 4~6색을 정해요
+const STAGES = [
+  { name: "1스테이지", sub: "별 6개를 모아요", sky: ["#8fd3ff", "#e8f7ff"], hill: "#9be38a" },
+  { name: "2스테이지", sub: "별이 둥둥 떠다녀요", sky: ["#ffb38f", "#ffeedd"], hill: "#e8b878" },
+  { name: "3스테이지", sub: "먹구름을 피해요!", sky: ["#5a4e9e", "#f7a8c4"], hill: "#7a6bb8" },
+];
+const SONG = {
+  bpm: 112, steps: 16, type: "square",
+  bass: [48, 0, 0, 0, 55, 0, 0, 0, 53, 0, 0, 0, 55, 0, 0, 0],
+  lead: [72, 0, 76, 0, 79, 0, 76, 0, 77, 0, 74, 0, 79, 0, 0, 0],
+  drum: [1, 0, 2, 0, 1, 0, 2, 0, 1, 0, 2, 0, 1, 0, 2, 2],
+};
+const STARS_PER_STAGE = 6;
+const player = { x: 0, y: 0, r: 20, lookX: 0, lookY: 0, sq: squash() };
+const star = { x: 0, y: 0, vx: 0, vy: 0 };
+const cloud = { x: 0, y: 0, on: false };
+let stage = 0, got = 0, total = 0, timeLeft = 0, scroll = 0, blinkT = 0, won = false;
 
-function placeDot() { dot = { x: 30 + Math.random() * (W - 60), y: 60 + Math.random() * (H - 90) }; }
+function placeStar() {
+  star.x = 40 + Math.random() * (W - 80); star.y = 90 + Math.random() * (H * 0.62 - 90);
+  const sp = stage >= 1 ? 60 : 0, a = Math.random() * TAU;
+  star.vx = Math.cos(a) * sp; star.vy = Math.sin(a) * sp;
+}
+function goStage(n) {
+  stage = n; got = 0;
+  cloud.on = n >= 2; cloud.x = player.x < W / 2 ? W - 40 : 40; cloud.y = 90;
+  placeStar(); banner(STAGES[n].name, STAGES[n].sub); sfx.whoosh();
+}
 
 function startGame() {
   if (state === "over") GameSDK.newRound();
-  state = "play"; score = 0; timeLeft = 20;
-  clearFx(); // 다시 하기 때 이전 판의 효과·버튼 상태를 깨끗이 지워요
-  player.x = W / 2; player.y = H / 2;
-  placeDot();
-  beep(660, 0.1);
+  state = "play"; score = 0; total = 0; timeLeft = 20; won = false;
+  clearFx(); clearDirector(); // 다시 하기 때 이전 판의 효과·연출·버튼 상태를 깨끗이 지워요
+  player.x = W / 2; player.y = H * 0.55;
+  goStage(0); music.start(SONG);
 }
 
-function endGame() {
-  state = "over";
+function endGame(clear) {
+  state = "over"; won = clear; music.stop();
   best = Math.max(best, score);
   GameSDK.submitScore(score);
-  beep(220, 0.3, "sawtooth");
-  shake(8, 0.25);
+  if (clear) { sfx.clear(); flash("#fff7c2", 0.3); } else { sfx.hit(); shake(8, 0.25); }
 }
 
 function update(dt) {
-  updateFx(dt);
-  if (state !== "play") return;
-  const speed = 320;
+  const gdt = updateDirector(dt); // hitStop 중에는 0
+  updateFx(dt); player.sq.update(dt);
+  scroll += 30 * dt; blinkT = (blinkT + dt) % 3.2;
+  if (state === "title") { player.x = W / 2; player.y = H * 0.72; return; }
+  if (state !== "play" || gdt === 0) return;
+
   let vx = 0, vy = 0;
   if (keys.has("ArrowLeft")) vx -= 1;
   if (keys.has("ArrowRight")) vx += 1;
   if (keys.has("ArrowUp")) vy -= 1;
   if (keys.has("ArrowDown")) vy += 1;
-  if (pointer.down) { const dx = pointer.x - player.x, dy = pointer.y - player.y, d = Math.hypot(dx, dy); if (d > 4) { vx = dx / d; vy = dy / d; } }
-  player.x = Math.max(player.r, Math.min(W - player.r, player.x + vx * speed * dt));
-  player.y = Math.max(player.r, Math.min(H - player.r, player.y + vy * speed * dt));
-  if (Math.hypot(dot.x - player.x, dot.y - player.y) < player.r + 10) {
-    score++; burst(dot.x, dot.y, "#f59e0b", 12); popup(dot.x, dot.y - 16, "+1"); shake(3, 0.08);
-    placeDot(); beep(880 + score * 20, 0.06);
+  if (pointer.down) { const dx = pointer.x - player.x, dy = pointer.y - player.y, d = Math.hypot(dx, dy); if (d > 6) { vx = dx / d; vy = dy / d; } }
+  const len = Math.hypot(vx, vy) || 1;
+  player.x = clamp(player.x + (vx / len) * 300 * gdt, player.r, W - player.r);
+  player.y = clamp(player.y + (vy / len) * 300 * gdt, 70 + player.r, H - player.r - 10);
+  player.lookX = lerp(player.lookX, vx / len, 0.2); player.lookY = lerp(player.lookY, vy / len, 0.2);
+
+  star.x += star.vx * gdt; star.y += star.vy * gdt;
+  if (star.x < 30 || star.x > W - 30) star.vx *= -1;
+  if (star.y < 90 || star.y > H * 0.7) star.vy *= -1;
+  star.x = clamp(star.x, 30, W - 30); star.y = clamp(star.y, 90, H * 0.7);
+
+  if (Math.hypot(star.x - player.x, star.y - player.y) < player.r + 16) {
+    const add = 10 * (stage + 1);
+    got++; total++; score += add;
+    burst(star.x, star.y, PAL.star, 14); popup(star.x, star.y - 20, `+${add}`, "#fff7c2");
+    player.sq.kick(0.35); sfx.coin(); shake(3, 0.08);
+    if (got >= STARS_PER_STAGE) {
+      timeLeft += 6; hitStop(0.08); zoomPunch(1.05, 0.25); sfx.clear();
+      if (stage + 1 >= STAGES.length) return endGame(true);
+      goStage(stage + 1);
+    } else placeStar();
   }
-  timeLeft -= dt;
-  if (timeLeft <= 0) endGame();
+
+  if (cloud.on) {
+    const dx = player.x - cloud.x, dy = player.y - cloud.y, d = Math.hypot(dx, dy) || 1;
+    cloud.x += (dx / d) * 70 * gdt; cloud.y += (dy / d) * 70 * gdt;
+    if (d < player.r + 22) {
+      timeLeft -= 3; player.sq.kick(-0.4); sfx.hit(); shake(7, 0.2); flash("#5a4e9e", 0.2);
+      popup(player.x, player.y - 34, "-3초", "#ffd0d0");
+      cloud.x = player.x < W / 2 ? W - 40 : 40; cloud.y = 90; // 멀리서 다시 나타나요
+    }
+  }
+
+  timeLeft -= gdt;
+  if (timeLeft <= 0) { timeLeft = 0; endGame(false); }
+}
+
+function drawScene() {
+  const st = STAGES[stage];
+  sky(st.sky);
+  clouds(scroll * 0.3, 4);
+  hills(scroll * 0.6, H * 0.8, 60, shade(st.hill, 0.2), 1); // 먼 언덕은 밝고 느리게
+  hills(scroll * 1.2, H * 0.9, 40, st.hill, 4);              // 가까운 언덕은 진하고 빠르게
+}
+function drawPlayer(bob) {
+  const footY = player.y + player.r;
+  groundShadow(player.x, footY + 6, player.r * 1.8);
+  beginSquash(player.x, footY, player.sq);
+  blob(player.x, player.y + bob, player.r * 1.1, player.r, PAL.pink);
+  eyes(player.x + player.lookX * 4, player.y + bob - 3, 9, player.lookX, player.lookY, blinkT > 3.05 ? 1 : 0);
+  ctx.restore();
 }
 
 function draw() {
-  ctx.fillStyle = "#1b1b1f"; ctx.fillRect(0, 0, W, H);
+  drawScene();
   beginShake();
-  if (state === "play" || state === "over") {
-    ctx.fillStyle = "#f59e0b"; ctx.beginPath(); ctx.arc(dot.x, dot.y, 10, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2); ctx.fill();
+  if (state === "title") drawPlayer(Math.sin(performance.now() / 300) * 6);
+  else {
+    const pulse = 1 + 0.12 * Math.sin(performance.now() / 150);
+    blob(star.x, star.y, 14 * pulse, 14 * pulse, PAL.star, { rot: performance.now() / 400 });
+    if (cloud.on) {
+      const d = Math.hypot(player.x - cloud.x, player.y - cloud.y) || 1;
+      blob(cloud.x, cloud.y, 30, 22, PAL.cloud);
+      eyes(cloud.x, cloud.y - 2, 8, (player.x - cloud.x) / d, (player.y - cloud.y) / d);
+    }
+    drawPlayer(0);
   }
   endShake();
   drawFx();
+  drawDirector();
   drawButtons();
-  if (state === "play" || state === "over") {
-    text(`점수 ${score}`, 16, 32, 20, "left");
-    text(`${Math.ceil(Math.max(0, timeLeft))}초`, W / 2, 32, 20);
+  if (state !== "title") {
+    textOutline(`점수 ${score}`, 16, 30, 20, "#ffffff", "#1b1b1f", "left");
+    textOutline(`${Math.ceil(timeLeft)}초`, W / 2, 30, 22);
+    text(`${STAGES[stage].name} · 별 ${got}/${STARS_PER_STAGE}`, W / 2, 58, fitSize(15), "center", "bold", "#ffffff");
   }
-  if (state === "title") drawTitle("게임 제목", "방향키나 손가락으로 점을 모아요");
-  if (state === "over") drawOver(score, best);
+  if (state === "title") drawTitle("게임 제목", "방향키나 손가락으로 별을 모아요", H * 0.38);
+  if (state === "over") drawOver(score, best, [`도달 스테이지 ${stage + 1}/${STAGES.length}`, `모은 별 ${total}개`], won ? "모두 클리어!" : "게임 끝");
 }
+
+// 검수용 손잡이: 검수 에이전트가 빨리 감기로 뒤쪽 스테이지·보스를 확인할 때 써요. 화면에는 영향이 없어요.
+window.__studio = {
+  info: () => ({ state, stage: stage + 1, stages: STAGES.length, score, timeLeft }),
+  stage: (n) => { if (state !== "play") startGame(); goStage(clamp(n - 1, 0, STAGES.length - 1)); },
+};
 // ---- 여기까지 ----
 
 function text(s, x, y, size, align = "center", weight = "normal", color = "#fff") {
@@ -357,6 +691,7 @@ function loop(now) {
   if (window.innerWidth !== W || window.innerHeight !== H) resize();
   update(dt);
   draw();
+  music.update();
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
