@@ -1,0 +1,823 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>폴짝폴짝 노라라 줄넘기 대회</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #9fdcff; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  .btn {
+    position: fixed; top: 4px; width: 48px; height: 48px; border: 0; border-radius: 12px; padding: 0;
+    background: rgba(255,255,255,.7); color: #333; font-size: 22px; cursor: pointer;
+    box-shadow: 0 2px 0 rgba(30,60,90,.18);
+  }
+  #mute { right: 8px; }
+  #emo { right: 62px; display: none; }
+  #emoPanel {
+    position: fixed; top: 58px; right: 8px; display: none; grid-template-columns: 1fr 1fr; gap: 4px;
+    padding: 6px; border-radius: 14px; background: rgba(255,255,255,.94); box-shadow: 0 4px 14px rgba(0,0,0,.18);
+  }
+  #emoPanel button {
+    height: 48px; min-width: 116px; border: 0; border-radius: 10px; background: #eef4fa; color: #223;
+    font: 700 15px -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    cursor: pointer; text-align: left; padding: 0 10px;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="mute" class="btn" aria-label="소리 끄기">🔊</button>
+<button id="emo" class="btn" aria-label="이모티콘">😊</button>
+<div id="emoPanel">
+  <button data-k="hi">👋 안녕!</button><button data-k="gg">🤝 GG</button>
+  <button data-k="again">🔁 한 판 더</button><button data-k="wow">😮 대단해요</button>
+  <button data-k="oops">😅 앗</button><button data-k="thanks">🙏 고마워요</button>
+</div>
+<script>
+/* ===== 게임 SDK: 리더보드 + 멀티 (public/sdk.js와 같은 코드. 지우지 마세요) ===== */
+/* 멀티 게임 쓰는 법은 games/README.md의 "멀티 게임"을 보세요 */
+(function () {
+  var sent = false;
+  var standalone = window.parent === window; // 파일을 직접 열었을 때
+  var listeners = { message: [], players: [], emote: [], error: [] };
+  var room = { joined: false, roomId: null, me: null, players: [], hostId: null, maxPlayers: 0 };
+  var waiting = [];
+
+  function post(msg) {
+    if (!standalone) window.parent.postMessage(msg, "*");
+  }
+  function emit(name, a, b) {
+    var list = listeners[name] || [];
+    for (var i = 0; i < list.length; i++) {
+      try { list[i](a, b); } catch (e) { setTimeout(function () { throw e; }); }
+    }
+  }
+  function settle(ok, value) {
+    var list = waiting;
+    waiting = [];
+    for (var i = 0; i < list.length; i++) {
+      clearTimeout(list[i].timer);
+      ok ? list[i].resolve(value) : list[i].reject(new Error(value));
+    }
+  }
+
+  window.addEventListener("message", function (event) {
+    if (standalone || event.source !== window.parent) return; // 바깥 플레이 페이지에서 온 것만
+    var m = event.data;
+    if (!m || typeof m !== "object") return;
+    if (m.type === "GAMESDK_MP_JOINED") {
+      room = { joined: true, roomId: m.roomId, me: m.me, players: m.players || [], hostId: m.hostId, maxPlayers: m.maxPlayers };
+      settle(true, { roomId: room.roomId, me: room.me, players: room.players, hostId: room.hostId, maxPlayers: room.maxPlayers });
+      emit("players", room.players, room.hostId);
+    } else if (m.type === "GAMESDK_MP_PLAYERS") {
+      room.players = m.players || [];
+      room.hostId = m.hostId;
+      emit("players", room.players, room.hostId);
+    } else if (m.type === "GAMESDK_MP_MESSAGE") {
+      emit("message", m.data, m.from);
+    } else if (m.type === "GAMESDK_MP_EMOTE") {
+      emit("emote", m.key, m.from);
+    } else if (m.type === "GAMESDK_MP_ERROR") {
+      if (!room.joined) settle(false, m.message);
+      emit("error", m.message);
+    }
+  });
+
+  window.GameSDK = {
+    submitScore: function (score) {
+      if (sent) return; // 한 판에 한 번만
+      if (typeof score !== "number" || !isFinite(score)) return;
+      sent = true;
+      post({ type: "GAMESDK_SCORE", score: score });
+    },
+    // 새 판을 시작할 때 부르면 다시 점수를 보낼 수 있어요.
+    newRound: function () {
+      sent = false;
+      post({ type: "GAMESDK_NEW_ROUND" });
+    },
+    multi: {
+      join: function () {
+        return new Promise(function (resolve, reject) {
+          if (standalone) return reject(new Error("사이트 밖에서는 멀티를 쓸 수 없어요"));
+          var w = { resolve: resolve, reject: reject, timer: 0 };
+          w.timer = setTimeout(function () {
+            waiting = waiting.filter(function (x) { return x !== w; });
+            reject(new Error("방에 들어가지 못했어요 (응답 없음)"));
+          }, 8000);
+          waiting.push(w);
+          post({ type: "GAMESDK_MP_JOIN" });
+        });
+      },
+      send: function (data) { if (room.joined) post({ type: "GAMESDK_MP_SEND", data: data }); },
+      emote: function (key) { if (room.joined) post({ type: "GAMESDK_MP_EMOTE", key: key }); },
+      lock: function (locked) { if (room.joined) post({ type: "GAMESDK_MP_LOCK", locked: locked !== false }); },
+      leave: function () {
+        if (!room.joined) return;
+        room = { joined: false, roomId: null, me: null, players: [], hostId: null, maxPlayers: 0 };
+        post({ type: "GAMESDK_MP_LEAVE" });
+      },
+      on: function (name, fn) { if (listeners[name] && typeof fn === "function") listeners[name].push(fn); },
+      me: function () { return room.me; },
+      players: function () { return room.players.slice(); },
+      hostId: function () { return room.hostId; },
+      isHost: function () { return !!room.me && room.me.id === room.hostId; },
+    },
+  };
+})();
+
+/* ===== 화면 크기 ===== */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* ===== 소리 (Web Audio) ===== */
+let audio = null, muted = false;
+function tone(f0, f1, dur, type, vol) {
+  if (!audio || muted) return;
+  const o = audio.createOscillator(), g = audio.createGain(), t = audio.currentTime;
+  o.type = type;
+  o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(audio.destination);
+  o.start(t); o.stop(t + dur);
+}
+const sfx = {
+  jump() { tone(380, 760, 0.12, "sine", 0.13); },          // 퐁
+  whoosh() { tone(520, 130, 0.1, "triangle", 0.05); },     // 휙
+  hit() { tone(170, 55, 0.24, "square", 0.12); },          // 뚝
+  other() { tone(220, 110, 0.12, "square", 0.04); },
+  combo() { tone(660, 990, 0.1, "square", 0.07); setTimeout(() => tone(990, 1320, 0.14, "square", 0.07), 90); },
+  join() { tone(500, 800, 0.1, "sine", 0.08); },
+  start() { tone(440, 880, 0.18, "triangle", 0.1); },
+};
+function unlockAudio() {
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audio = null; } }
+  if (audio && audio.state === "suspended") audio.resume();
+}
+const muteBtn = document.getElementById("mute");
+muteBtn.addEventListener("pointerdown", (e) => {
+  e.stopPropagation(); e.preventDefault(); unlockAudio();
+  muted = !muted;
+  muteBtn.textContent = muted ? "🔇" : "🔊";
+  muteBtn.setAttribute("aria-label", muted ? "소리 켜기" : "소리 끄기");
+});
+
+/* ===== 효과 부품 (파티클·점수 팝업·흔들림) ===== */
+const MAX_PARTICLES = 100, MAX_POPUPS = 10;
+const particles = [], popups = []; let particleNext = 0, popupNext = 0;
+for (let i = 0; i < MAX_PARTICLES; i++) particles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, color: "#fff", size: 3 });
+for (let i = 0; i < MAX_POPUPS; i++) popups.push({ x: 0, y: 0, life: 0, text: "", color: "#fff" });
+function burst(x, y, color, n, speed) {
+  for (let i = 0; i < n; i++) {
+    const p = particles[particleNext]; particleNext = (particleNext + 1) % MAX_PARTICLES;
+    const a = Math.random() * Math.PI * 2, v = speed * (0.4 + Math.random() * 0.6);
+    p.x = x; p.y = y; p.vx = Math.cos(a) * v; p.vy = Math.sin(a) * v - speed * 0.3;
+    p.max = p.life = 0.3 + Math.random() * 0.3; p.color = color; p.size = 2 + Math.random() * 3;
+  }
+}
+function popup(x, y, s, color) {
+  const p = popups[popupNext]; popupNext = (popupNext + 1) % MAX_POPUPS;
+  p.x = x; p.y = y; p.life = 0.8; p.text = s; p.color = color || "#fff";
+}
+let shakeTime = 0, shakePower = 0;
+function shake(power, time) { shakePower = Math.max(shakePower, power); shakeTime = Math.max(shakeTime, time); }
+function updateFx(dt) {
+  for (const p of particles) if (p.life > 0) { p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 400 * dt; }
+  for (const p of popups) if (p.life > 0) { p.life -= dt; p.y -= 44 * dt; }
+  if (shakeTime > 0) { shakeTime -= dt; if (shakeTime <= 0) shakePower = 0; }
+}
+function beginShake() {
+  ctx.save();
+  if (shakeTime > 0) ctx.translate((Math.random() - 0.5) * 2 * shakePower, (Math.random() - 0.5) * 2 * shakePower);
+}
+function endShake() { ctx.restore(); }
+function drawFx() {
+  for (const p of particles) if (p.life > 0) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max); ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  for (const p of popups) if (p.life > 0) {
+    ctx.globalAlpha = Math.min(1, p.life / 0.3);
+    ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,.45)";
+    textLine(p.text, p.x, p.y, 18, "center", "bold", p.color, true);
+  }
+  ctx.globalAlpha = 1;
+}
+function textLine(s, x, y, size, align, weight, color, stroke) {
+  ctx.textAlign = align; ctx.textBaseline = "middle";
+  ctx.font = `${weight} ${size}px -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`;
+  if (stroke) ctx.strokeText(s, x, y);
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+// 글자가 화면보다 넓으면 14px까지 줄여서 맞춰요
+function text(s, x, y, size, align = "center", weight = "normal", color = "#fff", maxW = 0) {
+  const lim = maxW || W - 16;
+  ctx.font = `${weight} ${size}px -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`;
+  const w = ctx.measureText(s).width;
+  if (w > lim) size = Math.max(14, Math.floor(size * lim / w));
+  textLine(s, x, y, size, align, weight, color, false);
+}
+
+/* ===== 규칙 상수 ===== */
+const AIR = 0.38;            // 점프 체공 시간(초). 가장 빠른 한 바퀴 0.8초의 절반(0.4)보다 짧아요
+const LO = 0.1, HI = 0.9;    // 체공 앞뒤 10%는 너그럽게 봐줘요 (그 사이에 줄이 지나가면 통과)
+const MAXT = 90;             // 한 판 최대 90초
+const PASS0 = 2.2;           // 첫 줄이 바닥을 지나는 시각(초)
+const PASS = [], PAIR = [];  // 줄이 바닥을 지나는 시각 / 0 보통, 1 따닥 첫째, 2 따닥 둘째 (모두 같은 값을 각자 계산해요)
+function periodAt(t) {
+  if (t < 10) return 1.4;
+  if (t < 30) return 1.4 - (t - 10) / 20 * 0.4;
+  if (t < 60) return 1.0 - (t - 30) / 30 * 0.2;
+  return 0.8;
+}
+(function buildPasses() {
+  let t = PASS0, k = 0, prev = 0;
+  while (t < MAXT + 3) {
+    let kind = 0;
+    if (prev === 1) kind = 2;
+    else if (t >= 58 && k % 5 === 2) kind = 1;
+    PASS.push(t); PAIR.push(kind);
+    t += kind === 1 ? 0.5 : kind === 2 ? 0.9 : periodAt(t);
+    prev = kind; k++;
+  }
+})();
+const BOT_NAMES = ["몽실", "보리", "콩이"];
+const OTHER_COLORS = ["#f472b6", "#38bdf8", "#a78bfa", "#34d399"];
+const EMO = { hi: "👋", gg: "🤝", again: "🔁", wow: "😮", oops: "😅", thanks: "🙏" };
+
+/* ===== 상태 ===== */
+let state = "title"; // title | lobby | play | over
+let best = 0, rounds = 0;
+let seed = 1, t0 = 0, gt = -9, passIdx = 0, warned = -1;
+let skipT = -1, resumeFlag = false, inputBlock = 0, endAt = -1;
+let liveSeen = -1e9, overAt = 0, lobbyAt = 0, lastState = 0, lastSend = 0, lastEmote = -1e9, submitted = false;
+let mySlot = 0;
+const slots = [];
+for (let i = 0; i < 4; i++) slots.push({ id: "", name: "", bot: true, alive: true, score: 0, combo: 0, js: -99, jt: 0, plan: -1, surv: true, did: false, deathAt: 0, starT: 0, emote: "", emoteUntil: 0, buf: -1, cx: 0 });
+const rankOrder = [0, 1, 2, 3];
+
+function hash(a, b) {
+  let h = (seed ^ Math.imul(a + 1, 0x9e3779b1) ^ Math.imul(b + 1, 0x85ebca6b)) >>> 0;
+  h ^= h >>> 15; h = Math.imul(h, 0x2c1b3c6d); h ^= h >>> 12; h = Math.imul(h, 0x297a2d39); h ^= h >>> 15;
+  return (h >>> 0) / 4294967296;
+}
+const BOT_SKILL = [1, 1.2, 0.8, 1.1];
+function botSurvives(i, k) { // 컴퓨터 친구가 이번 줄을 넘는지. 모든 화면이 같은 답을 내요
+  const p = (PAIR[k] === 2 ? 0.14 : 0.01 + 0.0005 * k) * BOT_SKILL[i];
+  return hash(i, k) >= p;
+}
+
+/* ===== 멀티 연결 ===== */
+const MP = GameSDK.multi;
+let online = false, joinState = "pending"; // pending | ok | fail
+let myId = "me", hostId = "me";
+let humans = [{ id: "me", name: "나" }];
+const nameCache = {};
+function cleanName(n) { return String(n == null ? "" : n).replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 6) || "친구"; }
+const amHost = () => !online || hostId === myId;
+function humanCount() { let n = 0; for (const s of slots) if (!s.bot) n++; return n; }
+function netOthers() { return online && humanCount() > 1; }
+
+GameSDK.multi.join().then((room) => {
+  online = true; joinState = "ok";
+  const old = myId;
+  myId = String(room.me && room.me.id != null ? room.me.id : "me").slice(0, 64);
+  for (const h of humans) if (h.id === old) h.id = myId;
+  if (hostId === old) hostId = myId;
+  applyPlayers(room.players, room.hostId);
+}).catch(() => { joinState = "fail"; online = false; });
+MP.on("players", (players, host) => { if (online) applyPlayers(players, host); });
+MP.on("message", (data, from) => onNet(data, String(from)));
+MP.on("emote", (key, from) => showEmote(String(from), key));
+
+function applyPlayers(players, host) {
+  const before = humans.length;
+  const list = [];
+  if (Array.isArray(players)) {
+    for (const p of players) {
+      if (!p || p.id == null) continue;
+      const id = String(p.id).slice(0, 64);
+      nameCache[id] = cleanName(p.name);
+      list.push({ id, name: nameCache[id] });
+      if (list.length >= 8) break;
+    }
+  }
+  if (!list.some((h) => h.id === myId)) list.unshift({ id: myId, name: "나" });
+  humans = list;
+  hostId = host != null ? String(host) : myId;
+  if (humans.length > before && before > 0) {
+    sfx.join(); lobbyAt = performance.now();
+    if (state !== "play") note(`${humans[humans.length - 1].name}님이 들어왔어요`, "", 1800, 1);
+  }
+  if (state === "play") { // 나간 사람은 걸린 걸로 해요
+    for (let i = 0; i < 4; i++) {
+      const s = slots[i];
+      if (!s.bot && s.alive && i !== mySlot && !humans.some((h) => h.id === s.id)) kill(i, gt, true);
+    }
+  }
+}
+
+function slotOf(id) { for (let i = 0; i < 4; i++) if (!slots[i].bot && slots[i].id === id) return i; return -1; }
+
+function onNet(d, from) {
+  if (!d || typeof d !== "object") return;
+  if (d.t === "start") {
+    if (from !== hostId || !Array.isArray(d.sl)) return;
+    applyStart(d.sl, d.seed | 0, Math.max(0, Math.min(5000, +d.d || 1800)));
+    return;
+  }
+  if (d.t === "st" && from === hostId) liveSeen = performance.now();
+  if (state === "title" || state === "lobby") return;
+  const i = slotOf(from);
+  if (i < 0 || i === mySlot) return;
+  const s = slots[i];
+  if (d.t === "j") {
+    if (typeof d.c === "number") s.score = Math.max(s.score, d.c | 0);
+    if (state === "play" && s.alive && gt >= s.js + AIR) { s.js = gt - 0.04; burst(s.cx, gy, "#d6c08a", 5, 80); }
+  } else if (d.t === "out") {
+    if (typeof d.c === "number") s.score = Math.max(s.score, d.c | 0);
+    if (s.alive && state === "play") kill(i, typeof d.at === "number" ? d.at : gt, true);
+    if (state === "over") computeRank();
+  } else if (d.t === "fin") {
+    if (typeof d.c === "number") s.score = Math.max(s.score, d.c | 0);
+    if (state === "over") computeRank();
+  } else if (d.t === "st" && from === hostId && Array.isArray(d.a) && Array.isArray(d.c) && state === "play") {
+    for (let k = 0; k < 4 && k < d.a.length; k++) {
+      const o = slots[k];
+      if (o.bot || k === mySlot) continue;
+      if (typeof d.c[k] === "number") o.score = Math.max(o.score, d.c[k] | 0);
+      if (d.a[k] === 0 && o.alive) kill(k, gt, true);
+    }
+  }
+}
+
+function showEmote(id, k) {
+  const icon = EMO[k];
+  if (!icon) return;
+  const i = slotOf(id);
+  if (i >= 0) { slots[i].emote = icon; slots[i].emoteUntil = performance.now() + 2200; }
+}
+function sendEmote(k) {
+  const now = performance.now();
+  if (!EMO[k] || !online || now - lastEmote < 1500) return;
+  lastEmote = now; MP.emote(k);
+  if (mySlot >= 0) { slots[mySlot].emote = EMO[k]; slots[mySlot].emoteUntil = now + 2200; }
+}
+const emoBtn = document.getElementById("emo"), emoPanel = document.getElementById("emoPanel");
+let emoOpen = false, emoShown = false;
+function setEmoOpen(v) { emoOpen = v; emoPanel.style.display = v ? "grid" : "none"; }
+emoBtn.addEventListener("pointerdown", (e) => { e.stopPropagation(); e.preventDefault(); unlockAudio(); setEmoOpen(!emoOpen); });
+emoPanel.addEventListener("pointerdown", (e) => {
+  e.stopPropagation(); e.preventDefault();
+  const b = e.target && e.target.closest ? e.target.closest("button") : null;
+  if (b) sendEmote(b.getAttribute("data-k"));
+  setEmoOpen(false);
+});
+
+/* ===== 안내 칸 (HUD 아래 한 곳에 한 번에 하나만) ===== */
+let nMain = "", nSub = "", nColor = "#fff", nUntil = 0, nPrio = 0, nBig = false;
+function note(main, sub, ms, prio, color, big) {
+  const now = performance.now();
+  if (now < nUntil && prio < nPrio) return;
+  nMain = main; nSub = sub || ""; nUntil = now + ms; nPrio = prio; nColor = color || "#fff"; nBig = !!big;
+}
+
+/* ===== 판 시작·진행 ===== */
+function resetSlot(s) {
+  s.alive = true; s.score = 0; s.combo = 0; s.js = -99; s.jt = 0; s.plan = -1; s.surv = true; s.did = false;
+  s.deathAt = 0; s.starT = 0; s.emote = ""; s.emoteUntil = 0; s.buf = -1;
+}
+function hostStart() {
+  if (!amHost()) return;
+  const sl = [];
+  const list = online ? humans : [{ id: myId, name: "나" }];
+  for (const h of list) if (sl.length < 4) sl.push([h.id, h.name]);
+  let b = 0;
+  while (sl.length < 4) sl.push(["", BOT_NAMES[b++ % 3]]);
+  const sd = (Math.random() * 1e9) | 0 || 1;
+  if (online) { MP.lock(true); MP.send({ t: "start", d: 1800, seed: sd, sl }); }
+  applyStart(sl, sd, 1800);
+}
+function applyStart(sl, sd, d) {
+  if (rounds > 0) GameSDK.newRound();
+  rounds++; submitted = false;
+  seed = sd; mySlot = -1;
+  for (let i = 0; i < 4; i++) {
+    const s = slots[i], e = Array.isArray(sl[i]) ? sl[i] : [""];
+    resetSlot(s);
+    s.id = String(e[0] || "").slice(0, 64); s.bot = !s.id;
+    s.name = s.bot ? BOT_NAMES[i % 3] : (s.id === myId ? "나" : nameCache[s.id] || "친구");
+    if (s.id === myId) mySlot = i;
+  }
+  state = "play"; t0 = performance.now() + d; gt = -d / 1000; passIdx = 0; warned = -1; skipT = -1; endAt = -1;
+  lastState = performance.now(); lastSend = 0; inputBlock = 0;
+  nUntil = 0; nPrio = 0;
+  for (const p of particles) p.life = 0;
+  for (const p of popups) p.life = 0;
+  shakeTime = 0; shakePower = 0;
+  setEmoOpen(false);
+  sfx.start();
+}
+
+function layoutPreview() { // 시작 전: 들어온 사람을 앞에, 나머지는 컴퓨터로 보여줘요
+  const list = online ? humans : [{ id: myId, name: "나" }];
+  mySlot = -1;
+  for (let i = 0; i < 4; i++) {
+    const s = slots[i], h = list[i];
+    if (h) { s.id = h.id; s.bot = false; s.name = h.name; if (h.id === myId) mySlot = i; }
+    else { s.id = ""; s.bot = true; s.name = BOT_NAMES[(i - list.length + 3) % 3]; }
+    s.alive = true; s.js = -99; s.score = 0;
+  }
+}
+
+function kill(i, at, silent) {
+  const s = slots[i];
+  if (!s.alive) return;
+  s.alive = false; s.deathAt = at; s.starT = performance.now();
+  const me = i === mySlot;
+  burst(s.cx, gy - R, "#fde047", me ? 14 : 8, 160);
+  if (me) {
+    sfx.hit(); shake(8, 0.25);
+    note("걸렸어요!", humanAlive() ? "친구들이 끝날 때까지 구경해요" : "곧 결과가 나와요", 2400, 3, "#fecaca");
+    if (netOthers()) MP.send({ t: "out", c: s.score, at: Math.round(at * 100) / 100 });
+    finishMine();
+  } else {
+    sfx.other(); shake(3, 0.1);
+    note(`${s.name}님이 걸렸어요`, "", 1500, 1, "#fff");
+  }
+}
+function finishMine() {
+  if (mySlot < 0 || submitted) return;
+  submitted = true;
+  const sc = slots[mySlot].score;
+  best = Math.max(best, sc);
+  GameSDK.submitScore(sc);
+}
+
+function humanAlive() { for (const s of slots) if (!s.bot && s.alive) return true; return false; }
+
+function endRound() {
+  if (state !== "play") return;
+  state = "over"; overAt = performance.now();
+  if (mySlot >= 0 && slots[mySlot].alive) {
+    if (netOthers()) MP.send({ t: "fin", c: slots[mySlot].score });
+    finishMine();
+  }
+  if (online && amHost()) MP.lock(false);
+  computeRank();
+  setEmoOpen(false);
+  nUntil = 0; nPrio = 0;
+}
+function rankKey(i) { const s = slots[i]; return s.alive ? 1000 : s.deathAt; }
+function rankCmp(a, b) { const d = rankKey(b) - rankKey(a); return d !== 0 ? d : slots[b].score - slots[a].score; }
+function computeRank() { for (let i = 0; i < 4; i++) rankOrder[i] = i; rankOrder.sort(rankCmp); }
+
+function jump() {
+  if (state !== "play" || gt < 0 || mySlot < 0) return;
+  const s = slots[mySlot];
+  if (!s.alive) return;
+  const now = performance.now();
+  if (now < inputBlock) return;
+  const t = (now - t0) / 1000;
+  const u = (t - s.js) / AIR;
+  if (u >= 0 && u < 1) { if (u > 0.55) s.buf = t; return; } // 거의 착지했으면 곧바로 다음 점프를 예약해요
+  s.js = t; s.buf = -1;
+  sfx.jump(); burst(s.cx, gy, "#d6c08a", 6, 90);
+  if (netOthers() && now - lastSend > 100) { lastSend = now; MP.send({ t: "j", c: s.score }); }
+}
+
+function judgePass(k) {
+  const P = PASS[k];
+  let sound = false;
+  for (let i = 0; i < 4; i++) {
+    const s = slots[i];
+    if (!s.alive) continue;
+    if (s.bot) {
+      if (!botSurvives(i, k)) kill(i, P, false);
+      else { s.score++; s.combo++; if (s.combo % 5 === 0) s.score += 2; }
+    } else if (i === mySlot) {
+      if (P < skipT) continue; // 탭을 오래 떠났다 돌아온 직후는 봐줘요
+      sound = true;
+      const u = (P - s.js) / AIR;
+      if (u >= LO && u <= HI) {
+        s.score++; s.combo++;
+        popup(s.cx, gy - 2 * R - 34, "+1", "#fff");
+        if (s.combo % 5 === 0) {
+          s.score += 2; sfx.combo();
+          note(`${s.combo}콤보! +2`, "", 1100, 2, "#fde047", true);
+          popup(s.cx, gy - 2 * R - 56, "+2", "#fde047"); burst(s.cx, gy - R, "#fde047", 12, 170);
+        }
+      } else kill(i, P, false);
+    }
+  }
+  if (sound && slots[mySlot] && slots[mySlot].alive) sfx.whoosh();
+}
+
+function update(dt) {
+  layout();
+  updateFx(dt);
+  const now = performance.now();
+  if (state === "lobby") lobbyTick(now);
+  else if (state === "over") overTick(now);
+  else if (state === "title" || state === "over") { /* 장식 */ }
+  if (state === "lobby" || state === "over" || state === "title") {
+    if (state !== "over") layoutPreview();
+    return;
+  }
+  gt = (now - t0) / 1000;
+  if (resumeFlag) { resumeFlag = false; skipT = gt + 0.45; inputBlock = now + 300; }
+  while (passIdx < PASS.length && gt >= PASS[passIdx]) { judgePass(passIdx); passIdx++; }
+  if (state !== "play") return;
+  if (PAIR[passIdx] === 1 && warned !== passIdx && gt >= PASS[passIdx] - 1.1) {
+    warned = passIdx; note("따닥 줄이 와요!", "두 번 연속으로 점프해요", 1300, 2, "#fde047");
+  }
+  for (let i = 0; i < 4; i++) { // 컴퓨터 친구 점프 (결과는 judgePass에서, 여기는 모양만)
+    const s = slots[i];
+    if (!s.bot || !s.alive || passIdx >= PASS.length) continue;
+    const k = passIdx;
+    if (s.plan !== k) {
+      s.plan = k; s.did = false; s.surv = botSurvives(i, k);
+      let jt = PASS[k] - AIR * 0.5 + (hash(i, k + 999) - 0.5) * 0.1;
+      if (PAIR[k] === 2) jt = Math.max(jt, s.js + AIR + 0.03);
+      s.jt = jt;
+    }
+    if (s.surv && !s.did && gt >= s.jt) { s.did = true; s.js = gt; burst(s.cx, gy, "#d6c08a", 4, 70); }
+  }
+  if (mySlot >= 0) { // 예약한 점프
+    const s = slots[mySlot];
+    if (s.alive && s.buf >= 0 && gt >= s.js + AIR) { const b = s.buf; s.buf = -1; if (gt - b < 0.25) jump(); }
+  }
+  if (online && amHost() && humans.length > 1 && now - lastState > 2000) {
+    lastState = now;
+    const a = [], c = [];
+    for (let i = 0; i < 4; i++) { a.push(slots[i].alive ? 1 : 0); c.push(slots[i].score); }
+    MP.send({ t: "st", a, c });
+  }
+  if (gt >= MAXT) endRound();
+  else if (!humanAlive()) { if (endAt < 0) endAt = gt + 1.6; else if (gt >= endAt) endRound(); }
+}
+
+function lobbyTick(now) {
+  if (joinState === "fail" || !online && joinState !== "pending") { hostStart(); return; }
+  if (joinState === "pending") return;
+  if (amHost() && (humans.length >= 4 || now - lobbyAt > 10000)) hostStart();
+}
+function overTick(now) {
+  if (online && amHost() && humans.length > 1 && now - overAt > 12000) hostStart();
+}
+
+function onPress(kind) {
+  unlockAudio();
+  const now = performance.now();
+  if (state === "title") { state = "lobby"; lobbyAt = now; layoutPreview(); return; }
+  if (state === "lobby") { if (joinState === "ok" && amHost()) hostStart(); return; }
+  if (state === "over") { if (now - overAt > 600 && amHost()) hostStart(); return; }
+  jump();
+}
+window.addEventListener("keydown", (e) => {
+  const c = e.code;
+  if (c === "Space" || c === "ArrowUp" || c === "KeyW") {
+    e.preventDefault();
+    if (!e.repeat) onPress("key");
+  }
+});
+canvas.addEventListener("pointerdown", (e) => { e.preventDefault(); if (emoOpen) setEmoOpen(false); onPress("pointer"); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) resumeFlag = true; });
+
+/* ===== 그리기 ===== */
+const HUD_H = 56;
+let gy = 0, R = 20, HT = 100, xL = 0, xR = 0, sp = 0, skyGrad = null, gW = 0, gH = 0;
+function layout() {
+  gy = Math.min(H - 58, Math.round(H * 0.74));
+  xL = W * 0.07; xR = W * 0.93; sp = (xR - xL) / 5;
+  R = Math.max(12, Math.min(32, sp * 0.38, H * 0.07));
+  HT = R * 3.6 + 30;
+  for (let i = 0; i < 4; i++) slots[i].cx = xL + sp * (i + 1);
+  if (gW !== W || gH !== H) {
+    gW = W; gH = H;
+    skyGrad = ctx.createLinearGradient(0, 0, 0, gy);
+    skyGrad.addColorStop(0, "#8fd3ff"); skyGrad.addColorStop(1, "#e3f6ff");
+  }
+}
+function ropePhi() {
+  if (state !== "play") return (performance.now() / 1900) % 1;
+  const a = passIdx > 0 ? PASS[passIdx - 1] : PASS[0] - 1.4;
+  const b = passIdx < PASS.length ? PASS[passIdx] : a + 1;
+  const f = (gt - a) / (b - a);
+  return f < 0 ? 0 : f > 1 ? 1 : f;
+}
+function jumpH(s, t) {
+  const u = (t - s.js) / AIR;
+  return u > 0 && u < 1 ? R * 1.8 * 4 * u * (1 - u) : 0;
+}
+function drawScene() {
+  ctx.fillStyle = skyGrad; ctx.fillRect(0, 0, W, gy);
+  const tm = performance.now() / 1000;
+  ctx.fillStyle = "rgba(255,255,255,.85)";
+  for (let i = 0; i < 3; i++) {
+    const cx = ((tm * (6 + i * 3) + i * W * 0.37) % (W + 120)) - 60, cy = HUD_H + 40 + i * 26 + (i % 2) * 14;
+    ctx.beginPath(); ctx.ellipse(cx, cy, 34, 12, 0, 0, 6.3); ctx.ellipse(cx + 18, cy - 8, 20, 10, 0, 0, 6.3); ctx.fill();
+  }
+  ctx.fillStyle = "#7ccf5a"; ctx.fillRect(0, gy, W, H - gy);
+  ctx.fillStyle = "#6bbd4a"; ctx.fillRect(0, gy, W, 4);
+  ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.fillRect(0, gy + 26, W, 2);
+  // 기둥
+  const yH = gy - R * 0.8;
+  ctx.fillStyle = "#8b5a2b";
+  ctx.fillRect(xL - 5, yH - 4, 10, gy - yH + 8); ctx.fillRect(xR - 5, yH - 4, 10, gy - yH + 8);
+  ctx.fillStyle = "#c98a4b"; ctx.beginPath(); ctx.arc(xL, yH - 4, 7, 0, 6.3); ctx.arc(xR, yH - 4, 7, 0, 6.3); ctx.fill();
+}
+function drawRope() {
+  const phi = ropePhi();
+  const yH = gy - R * 0.8;
+  const midY = gy - 2 - Math.sin(Math.PI * phi) * HT;
+  const c = yH + (midY - yH) / 0.75;
+  const warn = state === "play" && ((PAIR[passIdx] === 1 && gt >= PASS[passIdx] - 1.1) || PAIR[passIdx] === 2);
+  ctx.lineCap = "round";
+  ctx.strokeStyle = warn ? "#facc15" : "#dc2626"; ctx.lineWidth = Math.max(4, R * 0.28);
+  ctx.beginPath(); ctx.moveTo(xL, yH); ctx.bezierCurveTo(xL, c, xR, c, xR, yH); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(xL, yH - 1.5); ctx.bezierCurveTo(xL, c - 1.5, xR, c - 1.5, xR, yH - 1.5); ctx.stroke();
+}
+function drawChar(x, fy, color, kind, alpha, dead) {
+  const r = R;
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = "rgba(0,0,0,.18)"; // 그림자는 땅에
+  ctx.beginPath(); ctx.ellipse(x, gy + 3, r * (0.9 - Math.min(0.3, (gy - fy) / (r * 8))), r * 0.25, 0, 0, 6.3); ctx.fill();
+  const cy = fy - r;
+  ctx.fillStyle = color;
+  if (kind === 0) { // 고양이 귀
+    ctx.beginPath(); ctx.moveTo(x - r * 0.9, cy - r * 0.3); ctx.lineTo(x - r * 0.7, cy - r * 1.5); ctx.lineTo(x - r * 0.1, cy - r * 0.8); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x + r * 0.9, cy - r * 0.3); ctx.lineTo(x + r * 0.7, cy - r * 1.5); ctx.lineTo(x + r * 0.1, cy - r * 0.8); ctx.fill();
+  } else if (kind === 1) { // 토끼 귀
+    ctx.beginPath(); ctx.ellipse(x - r * 0.45, cy - r * 1.3, r * 0.25, r * 0.7, -0.15, 0, 6.3); ctx.ellipse(x + r * 0.45, cy - r * 1.3, r * 0.25, r * 0.7, 0.15, 0, 6.3); ctx.fill();
+  } else if (kind === 2) { // 곰 귀
+    ctx.beginPath(); ctx.arc(x - r * 0.7, cy - r * 0.8, r * 0.34, 0, 6.3); ctx.arc(x + r * 0.7, cy - r * 0.8, r * 0.34, 0, 6.3); ctx.fill();
+  } else { // 쥐 귀
+    ctx.beginPath(); ctx.arc(x - r * 0.75, cy - r * 0.75, r * 0.48, 0, 6.3); ctx.arc(x + r * 0.75, cy - r * 0.75, r * 0.48, 0, 6.3); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.45)";
+    ctx.beginPath(); ctx.arc(x - r * 0.75, cy - r * 0.75, r * 0.26, 0, 6.3); ctx.arc(x + r * 0.75, cy - r * 0.75, r * 0.26, 0, 6.3); ctx.fill();
+    ctx.fillStyle = color;
+  }
+  ctx.beginPath(); ctx.arc(x, cy, r, 0, 6.3); ctx.fill();               // 몸
+  ctx.fillStyle = "rgba(255,255,255,.3)";
+  ctx.beginPath(); ctx.ellipse(x, cy + r * 0.3, r * 0.65, r * 0.55, 0, 0, 6.3); ctx.fill(); // 배
+  ctx.fillStyle = color; // 발
+  ctx.beginPath(); ctx.ellipse(x - r * 0.4, fy - 1, r * 0.3, r * 0.16, 0, 0, 6.3); ctx.ellipse(x + r * 0.4, fy - 1, r * 0.3, r * 0.16, 0, 0, 6.3); ctx.fill();
+  ctx.strokeStyle = "#2b2b2b"; ctx.fillStyle = "#2b2b2b"; ctx.lineWidth = Math.max(1.5, r * 0.09);
+  const ey = cy - r * 0.15, ex = r * 0.36;
+  if (dead) {
+    ctx.beginPath();
+    for (const sx of [-1, 1]) { ctx.moveTo(x + sx * ex - r * 0.12, ey - r * 0.12); ctx.lineTo(x + sx * ex + r * 0.12, ey + r * 0.12); ctx.moveTo(x + sx * ex + r * 0.12, ey - r * 0.12); ctx.lineTo(x + sx * ex - r * 0.12, ey + r * 0.12); }
+    ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(x - ex, ey, r * 0.11, 0, 6.3); ctx.arc(x + ex, ey, r * 0.11, 0, 6.3); ctx.fill();
+  }
+  ctx.fillStyle = "rgba(244,114,182,.55)";
+  ctx.beginPath(); ctx.arc(x - r * 0.62, cy + r * 0.2, r * 0.16, 0, 6.3); ctx.arc(x + r * 0.62, cy + r * 0.2, r * 0.16, 0, 6.3); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+function drawChars(showAll) {
+  const now = performance.now();
+  const t = state === "play" ? gt : 0;
+  for (let i = 0; i < 4; i++) {
+    const s = slots[i], x = s.cx;
+    const me = i === mySlot;
+    const fy = gy - (state === "play" || state === "over" ? jumpH(s, state === "play" ? t : s.js + AIR * 2) : 0);
+    drawChar(x, fy, me ? "#f59e0b" : OTHER_COLORS[i], i % 4, s.alive ? (s.bot && state === "lobby" ? 0.7 : 1) : 0.4, !s.alive);
+    if (!s.alive) { // 별이 빙글빙글
+      const age = (now - s.starT) / 1000;
+      if (age < 1.6) {
+        ctx.fillStyle = "#fde047";
+        for (let k = 0; k < 3; k++) {
+          const a = age * 6 + k * 2.1;
+          ctx.beginPath(); ctx.arc(x + Math.cos(a) * R * 0.9, fy - R * 2.1 + Math.sin(a) * R * 0.25, Math.max(2.5, R * 0.14), 0, 6.3); ctx.fill();
+        }
+      }
+    }
+    if (me && s.alive) { // 내 캐릭터 화살표
+      const ay = fy - 2 * R - 14 + Math.sin(now / 160) * 2;
+      ctx.fillStyle = "#ea580c"; ctx.beginPath(); ctx.moveTo(x - 7, ay - 6); ctx.lineTo(x + 7, ay - 6); ctx.lineTo(x, ay + 3); ctx.fill();
+    }
+    if (s.emote && s.emoteUntil > now) text(s.emote, x, fy - 2 * R - 34, 24, "center", "normal", "#000", 60);
+    // 이름표 (홀짝 줄을 달리해서 좁은 화면에서도 안 겹쳐요)
+    const ty = gy + 16 + (i % 2) * 22;
+    const label = me ? "나" : s.bot ? s.name : s.name;
+    text(label, x, ty, 14, "center", me ? "bold" : "normal", s.alive ? (me ? "#7c2d12" : "#14532d") : "#52714a", sp * 1.9);
+  }
+}
+function drawHud() {
+  ctx.fillStyle = "rgba(255,255,255,.55)"; ctx.fillRect(0, 0, W, HUD_H);
+  let alive = 0; for (const s of slots) if (s.alive) alive++;
+  const sc = mySlot >= 0 ? slots[mySlot].score : 0;
+  text(`점수 ${sc}  ·  생존 ${alive}/4`, 12, HUD_H / 2, 18, "left", "bold", "#14304a", W - 130);
+  if (state === "play" && gt >= 0) {
+    ctx.fillStyle = "rgba(20,48,74,.25)"; ctx.fillRect(0, HUD_H - 4, W, 4);
+    ctx.fillStyle = "#f59e0b"; ctx.fillRect(0, HUD_H - 4, W * Math.min(1, gt / MAXT), 4);
+  }
+}
+function pill(main, sub, color, big) {
+  const y1 = HUD_H + 19, size = big ? 26 + Math.sin(performance.now() / 70) * 2 : 18;
+  ctx.font = `bold ${size}px sans-serif`;
+  let w = ctx.measureText(main).width;
+  if (sub) { ctx.font = "14px sans-serif"; w = Math.max(w, ctx.measureText(sub).width); }
+  w = Math.min(W - 8, w + 28);
+  const h = sub ? 52 : (big ? 36 : 30);
+  ctx.fillStyle = "rgba(0,0,0,.5)";
+  ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(W / 2 - w / 2, HUD_H + 4, w, h, 14); else ctx.rect(W / 2 - w / 2, HUD_H + 4, w, h); ctx.fill();
+  text(main, W / 2, y1 + (sub ? 0 : (big ? 3 : 0)), size, "center", "bold", color, W - 24);
+  if (sub) text(sub, W / 2, y1 + 26, 14, "center", "normal", "#fff", W - 24);
+}
+function drawNotice() {
+  const now = performance.now();
+  if (now < nUntil) return pill(nMain, nSub, nColor, nBig);
+  if (state === "lobby") {
+    if (joinState === "pending") return pill("방에 들어가는 중이에요", "", "#fff");
+    const n = online ? humans.length : 1;
+    if (now - liveSeen < 5000) return pill("지금 판이 진행 중이에요", "끝나면 같이 시작해요", "#fff");
+    if (n >= 2 && !amHost()) return pill(`방장이 시작하길 기다려요 (${n}/4)`, "", "#fff");
+    const left = Math.max(0, Math.ceil(10 - (now - lobbyAt) / 1000));
+    return pill(`다른 플레이어를 기다리는 중 (${n}/4)`, `탭·스페이스로 바로 시작 (${left}초 뒤 자동)`, "#fff");
+  }
+  if (state === "play") {
+    if (gt < 0) return pill(`준비하세요! ${Math.ceil(-gt)}`, "", "#fde047");
+    if (mySlot < 0) return pill("구경 중이에요", "다음 판부터 같이 해요", "#fff");
+    if (!slots[mySlot].alive) return pill("구경 중이에요", "친구들을 응원해요", "#fff");
+    if (gt < 7) return pill("줄이 내려올 때 점프해요!", "탭하거나 스페이스를 눌러요", "#fff");
+  }
+}
+function drawResult() {
+  ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.fillRect(0, HUD_H, W, H - HUD_H);
+  const ph = Math.min(H - HUD_H - 14, 226), top = HUD_H + 7 + (H - HUD_H - 14 - ph) / 2;
+  const pw = Math.min(W - 16, 330);
+  ctx.fillStyle = "rgba(255,255,255,.95)";
+  ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(W / 2 - pw / 2, top, pw, ph, 18); else ctx.rect(W / 2 - pw / 2, top, pw, ph); ctx.fill();
+  const win = rankOrder[0] === mySlot;
+  text(win ? "1등이에요! 🎉" : "게임 끝", W / 2, top + 26, 26, "center", "bold", "#c2410c", pw - 20);
+  for (let r = 0; r < 4; r++) {
+    const i = rankOrder[r], s = slots[i], y = top + 62 + r * 25, me = i === mySlot;
+    const col = me ? "#c2410c" : "#1f3a52";
+    text(`${r + 1}등 ${me ? "나" : s.name}`, W / 2 - pw / 2 + 20, y, 16, "left", me ? "bold" : "normal", col, pw * 0.5);
+    text(`${s.score}점 · ${s.alive ? "생존" : Math.floor(s.deathAt) + "초"}`, W / 2 + pw / 2 - 20, y, 16, "right", me ? "bold" : "normal", col, pw * 0.45);
+  }
+  const sc = mySlot >= 0 ? slots[mySlot].score : 0;
+  text(`내 점수 ${sc} · 최고 ${best}`, W / 2, top + 172, 16, "center", "bold", "#14304a", pw - 20);
+  const waitHost = online && humans.length > 1 && !amHost();
+  const auto = online && humans.length > 1 && amHost() ? ` (${Math.max(0, Math.ceil(12 - (performance.now() - overAt) / 1000))}초 뒤 자동)` : "";
+  text(waitHost ? "방장이 곧 다시 시작해요" : "탭·스페이스로 다시 하기" + auto, W / 2, top + 202, 16, "center", "bold", "#ea580c", pw - 20);
+}
+function drawTitle() {
+  const cy = HUD_H + (H - HUD_H) * 0.4;
+  ctx.fillStyle = "rgba(0,0,0,.72)";
+  const pw = Math.min(W - 16, 380), ph = 190;
+  ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(W / 2 - pw / 2, cy - 95, pw, ph, 20); else ctx.rect(W / 2 - pw / 2, cy - 95, pw, ph); ctx.fill();
+  const fs = Math.max(24, Math.round(36 * Math.min(1, W / 420)));
+  text("폴짝폴짝 노라라", W / 2, cy - 58, fs, "center", "bold", "#fff", pw - 20);
+  text("줄넘기 대회", W / 2, cy - 58 + fs * 1.15, fs, "center", "bold", "#fde047", pw - 20);
+  text("탭·스페이스로 점프해서 줄을 넘어요", W / 2, cy + 28, 16, "center", "normal", "#fff", pw - 20);
+  text("탭하거나 스페이스를 눌러 시작", W / 2, cy + 62, 16, "center", "bold", "#f59e0b", pw - 20);
+}
+function draw() {
+  beginShake();
+  drawScene();
+  if (state !== "title") drawChars();
+  drawRope();
+  endShake();
+  drawFx();
+  if (state !== "title") {
+    drawHud();
+    if (state === "over") drawResult(); else drawNotice();
+  } else drawTitle();
+  const wantEmo = online && humans.length > 1 && state !== "title";
+  if (wantEmo !== emoShown) { emoShown = wantEmo; emoBtn.style.display = wantEmo ? "block" : "none"; if (!wantEmo) setEmoOpen(false); }
+}
+
+/* ===== 메인 루프 ===== */
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (window.innerWidth !== W || window.innerHeight !== H) resize();
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+layout();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
