@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>번쩍 노라라 숫자 빨리 누르기</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #fdf6e3; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #mute {
+    position: fixed; top: 2px; right: 4px; width: 48px; height: 48px; border: 0; border-radius: 12px;
+    background: rgba(27,38,90,.12); color: #1b265a; font-size: 22px; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<button id="mute" aria-label="소리 끄기" tabindex="-1">🔊</button>
+<script>
+/* ===== 게임 SDK: 리더보드 + 멀티 (public/sdk.js와 같은 코드. 지우지 마세요) ===== */
+/* 멀티 게임 쓰는 법은 games/README.md의 "멀티 게임"을 보세요 */
+(function () {
+  var sent = false;
+  var standalone = window.parent === window; // 파일을 직접 열었을 때
+  var listeners = { message: [], players: [], emote: [], error: [] };
+  var room = { joined: false, roomId: null, me: null, players: [], hostId: null, maxPlayers: 0 };
+  var waiting = [];
+
+  function post(msg) {
+    if (!standalone) window.parent.postMessage(msg, "*");
+  }
+  function emit(name, a, b) {
+    var list = listeners[name] || [];
+    for (var i = 0; i < list.length; i++) {
+      try { list[i](a, b); } catch (e) { setTimeout(function () { throw e; }); }
+    }
+  }
+  function settle(ok, value) {
+    var list = waiting;
+    waiting = [];
+    for (var i = 0; i < list.length; i++) {
+      clearTimeout(list[i].timer);
+      ok ? list[i].resolve(value) : list[i].reject(new Error(value));
+    }
+  }
+
+  window.addEventListener("message", function (event) {
+    if (standalone || event.source !== window.parent) return; // 바깥 플레이 페이지에서 온 것만
+    var m = event.data;
+    if (!m || typeof m !== "object") return;
+    if (m.type === "GAMESDK_MP_JOINED") {
+      room = { joined: true, roomId: m.roomId, me: m.me, players: m.players || [], hostId: m.hostId, maxPlayers: m.maxPlayers };
+      settle(true, { roomId: room.roomId, me: room.me, players: room.players, hostId: room.hostId, maxPlayers: room.maxPlayers });
+      emit("players", room.players, room.hostId);
+    } else if (m.type === "GAMESDK_MP_PLAYERS") {
+      room.players = m.players || [];
+      room.hostId = m.hostId;
+      emit("players", room.players, room.hostId);
+    } else if (m.type === "GAMESDK_MP_MESSAGE") {
+      emit("message", m.data, m.from);
+    } else if (m.type === "GAMESDK_MP_EMOTE") {
+      emit("emote", m.key, m.from);
+    } else if (m.type === "GAMESDK_MP_ERROR") {
+      if (!room.joined) settle(false, m.message);
+      emit("error", m.message);
+    }
+  });
+
+  window.GameSDK = {
+    submitScore: function (score) {
+      if (sent) return; // 한 판에 한 번만
+      if (typeof score !== "number" || !isFinite(score)) return;
+      sent = true;
+      post({ type: "GAMESDK_SCORE", score: score });
+    },
+    // 새 판을 시작할 때 부르면 다시 점수를 보낼 수 있어요.
+    newRound: function () {
+      sent = false;
+      post({ type: "GAMESDK_NEW_ROUND" });
+    },
+    multi: {
+      join: function () {
+        return new Promise(function (resolve, reject) {
+          if (standalone) return reject(new Error("사이트 밖에서는 멀티를 쓸 수 없어요"));
+          var w = { resolve: resolve, reject: reject, timer: 0 };
+          w.timer = setTimeout(function () {
+            waiting = waiting.filter(function (x) { return x !== w; });
+            reject(new Error("방에 들어가지 못했어요 (응답 없음)"));
+          }, 8000);
+          waiting.push(w);
+          post({ type: "GAMESDK_MP_JOIN" });
+        });
+      },
+      send: function (data) { if (room.joined) post({ type: "GAMESDK_MP_SEND", data: data }); },
+      emote: function (key) { if (room.joined) post({ type: "GAMESDK_MP_EMOTE", key: key }); },
+      lock: function (locked) { if (room.joined) post({ type: "GAMESDK_MP_LOCK", locked: locked !== false }); },
+      leave: function () {
+        if (!room.joined) return;
+        room = { joined: false, roomId: null, me: null, players: [], hostId: null, maxPlayers: 0 };
+        post({ type: "GAMESDK_MP_LEAVE" });
+      },
+      on: function (name, fn) { if (listeners[name] && typeof fn === "function") listeners[name].push(fn); },
+      me: function () { return room.me; },
+      players: function () { return room.players.slice(); },
+      hostId: function () { return room.hostId; },
+      isHost: function () { return !!room.me && room.me.id === room.hostId; },
+    },
+  };
+})();
+
+/* ===== 화면 크기 ===== */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* ===== 소리 ===== */
+let audio = null, muted = false;
+function beep(freq, dur = 0.08, type = "sine", vol = 0.1) {
+  if (!audio || muted) return;
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, audio.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + dur);
+  o.connect(g).connect(audio.destination);
+  o.start(); o.stop(audio.currentTime + dur);
+}
+function unlockAudio() {
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audio = null; } }
+  if (audio && audio.state === "suspended") audio.resume();
+}
+const muteBtn = document.getElementById("mute");
+muteBtn.addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+  unlockAudio();
+  muted = !muted;
+  muteBtn.textContent = muted ? "🔇" : "🔊";
+  muteBtn.setAttribute("aria-label", muted ? "소리 켜기" : "소리 끄기");
+});
+muteBtn.addEventListener("pointerup", () => muteBtn.blur());
+
+const MAX_PARTICLES = 120, MAX_POPUPS = 12;
+const particles = []; let particleNext = 0; // 미리 만든 객체를 돌려 써요 (매 프레임 새로 만들지 않아요)
+const popups = []; let popupNext = 0;
+for (let i = 0; i < MAX_PARTICLES; i++) particles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, color: "#fff", size: 3 });
+for (let i = 0; i < MAX_POPUPS; i++) popups.push({ x: 0, y: 0, life: 0, text: "", color: "#fff" });
+function burst(x, y, color = "#fff", n = 10, speed = 180) {
+  for (let i = 0; i < n; i++) {
+    const p = particles[particleNext]; particleNext = (particleNext + 1) % MAX_PARTICLES;
+    const a = Math.random() * Math.PI * 2, v = speed * (0.4 + Math.random() * 0.6);
+    p.x = x; p.y = y; p.vx = Math.cos(a) * v; p.vy = Math.sin(a) * v;
+    p.max = p.life = 0.35 + Math.random() * 0.3; p.color = color; p.size = 2 + Math.random() * 3;
+  }
+}
+function popup(x, y, s, color = "#fff") {
+  const p = popups[popupNext]; popupNext = (popupNext + 1) % MAX_POPUPS;
+  p.x = x; p.y = y; p.life = 0.7; p.text = s; p.color = color;
+}
+let shakeTime = 0, shakePower = 0;
+function shake(power = 6, time = 0.15) { shakePower = Math.max(shakePower, power); shakeTime = Math.max(shakeTime, time); }
+function updateFx(dt) {
+  for (const p of particles) if (p.life > 0) { p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 400 * dt; }
+  for (const p of popups) if (p.life > 0) { p.life -= dt; p.y -= 50 * dt; }
+  if (shakeTime > 0) { shakeTime -= dt; if (shakeTime <= 0) shakePower = 0; }
+}
+function beginShake() {
+  ctx.save();
+  if (shakeTime > 0) ctx.translate((Math.random() - 0.5) * 2 * shakePower, (Math.random() - 0.5) * 2 * shakePower);
+}
+function endShake() { ctx.restore(); }
+function drawFx() {
+  for (const p of particles) if (p.life > 0) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max); ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  for (const p of popups) if (p.life > 0) {
+    ctx.globalAlpha = Math.min(1, p.life / 0.3);
+    text(p.text, p.x, p.y, 18, "center", "bold", p.color);
+  }
+  ctx.globalAlpha = 1;
+}
+function clearFx() {
+  for (const p of particles) p.life = 0;
+  for (const p of popups) p.life = 0;
+  shakeTime = 0; shakePower = 0;
+}
+
+function text(s, x, y, size, align = "center", weight = "normal", color = "#1b265a") {
+  ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = "middle";
+  ctx.font = `${weight} ${size}px -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`;
+  ctx.fillText(s, x, y);
+}
+// 폭에 맞춰 글자 크기를 줄여요 (14px 밑으로는 안 내려가요)
+function fitText(s, x, y, size, maxW, weight = "normal", color = "#1b265a") {
+  ctx.font = `${weight} ${size}px sans-serif`;
+  const w = ctx.measureText(s).width;
+  text(s, x, y, Math.max(14, Math.floor(w > maxW ? size * maxW / w : size)), "center", weight, color);
+}
+
+/* ===== 게임 상태 ===== */
+let state = "title"; // title | count | play | over
+let best = 0, finalTime = 0;
+let paused = false;
+let elapsed = 0, penalty = 0, penaltyCool = 0, countT = 0, overT = 0, flash = 0;
+let next = 1;
+const vals = new Array(16).fill(0);
+const cellShake = new Array(16).fill(0);
+const cellPop = new Array(16).fill(0);
+let noticeText = "", noticeColor = "#1b265a", noticeT = 0;
+const KEYMAP = { Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3, KeyQ: 4, KeyW: 5, KeyE: 6, KeyR: 7,
+  KeyA: 8, KeyS: 9, KeyD: 10, KeyF: 11, KeyZ: 12, KeyX: 13, KeyC: 14, KeyV: 15 };
+const SCALE = [0.8, 0.92, 1.0, 1.1];
+let gx = 0, gy = 0, gs = 0, hudH = 52, noteH = 28;
+
+function layout() {
+  const top = hudH + noteH + 4, avail = H - top - 8;
+  gs = Math.max(120, Math.min(W - 12, avail));
+  gx = (W - gs) / 2; gy = top + Math.max(0, (avail - gs) / 2);
+}
+function setNotice(s, color, dur) { noticeText = s; noticeColor = color || "#1b265a"; noticeT = dur || 1; }
+function shuffleInto() {
+  for (let i = 0; i < 16; i++) vals[i] = i + 1;
+  for (let i = 15; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = vals[i]; vals[i] = vals[j]; vals[j] = t; }
+}
+function cellCenter(i) { const cs = gs / 4; return { x: gx + (i % 4 + 0.5) * cs, y: gy + (Math.floor(i / 4) + 0.5) * cs }; }
+function curTime() { return elapsed + penalty; }
+
+function startGame() {
+  if (state === "over") GameSDK.newRound();
+  clearFx();
+  shuffleInto();
+  next = 1; elapsed = 0; penalty = 0; penaltyCool = 0; flash = 0; paused = false;
+  for (let i = 0; i < 16; i++) { cellShake[i] = 0; cellPop[i] = 0; }
+  state = "count"; countT = 3; noticeT = 0;
+  beep(520, 0.1);
+}
+
+function endGame() {
+  state = "over"; overT = 0;
+  finalTime = Math.round(curTime() * 100) / 100;
+  if (best === 0 || finalTime < best) best = finalTime;
+  GameSDK.submitScore(finalTime);
+  flash = 0.6;
+  noticeT = 0;
+  shake(8, 0.25);
+  [523, 659, 784, 1046].forEach((f, k) => setTimeout(() => beep(f, 0.18, "triangle", 0.12), k * 90));
+}
+
+function pressCell(i) {
+  if (state !== "play" || paused) return;
+  const v = vals[i], c = cellCenter(i);
+  if (v === next) {
+    cellPop[i] = 0.2;
+    burst(c.x, c.y, v % 2 ? "#f59e0b" : "#38bdf8", 10, 160);
+    beep(380 + v * 22, 0.07, "sine", 0.12);
+    if (v <= 16) vals[i] = v + 16; else vals[i] = 0;
+    next++;
+    if (v === 16) { flash = 0.3; burst(c.x, c.y, "#f59e0b", 24, 260); beep(1180, 0.2, "triangle", 0.12); setNotice("반이에요! 계속 가요", "#d97706", 1.2); }
+    if (v === 32) { burst(c.x, c.y, "#f59e0b", 30, 300); endGame(); }
+  } else if (v !== 0 && penaltyCool <= 0) {
+    penalty += 0.5; penaltyCool = 0.3; cellShake[i] = 0.25;
+    shake(5, 0.15);
+    burst(c.x, c.y, "#ef4444", 6, 120);
+    beep(130, 0.18, "sawtooth", 0.1);
+    setNotice("틀렸어요 +0.5초", "#dc2626", 0.8);
+  } else if (v === 0) {
+    // 빈 칸은 무시해요
+  } else {
+    cellShake[i] = 0.15;
+  }
+}
+
+function hitCell(x, y) {
+  if (x < gx || y < gy || x >= gx + gs || y >= gy + gs) return -1;
+  const cs = gs / 4;
+  return Math.floor((y - gy) / cs) * 4 + Math.floor((x - gx) / cs);
+}
+
+function startOrResume() {
+  if (paused) { paused = false; noticeT = 0; return true; }
+  if (state === "title") { startGame(); return true; }
+  if (state === "over") { if (overT >= 0.6) startGame(); return true; }
+  return false;
+}
+
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space" || e.code === "Enter") e.preventDefault();
+  if (e.repeat) return;
+  unlockAudio();
+  if (e.code === "Space" || e.code === "Enter") { startOrResume(); return; }
+  if (startOrResume()) return;
+  if (e.code in KEYMAP) pressCell(KEYMAP[e.code]);
+});
+canvas.addEventListener("pointerdown", (e) => {
+  unlockAudio();
+  if (startOrResume()) return;
+  pressCell(hitCell(e.clientX, e.clientY));
+});
+function pauseGame() { if (state === "play" || state === "count") { paused = true; setNotice("멈췄어요. 탭하면 이어가요", "#1b265a", 9999); } }
+window.addEventListener("blur", pauseGame);
+document.addEventListener("visibilitychange", () => { if (document.hidden) pauseGame(); });
+
+function update(dt) {
+  updateFx(dt);
+  for (let i = 0; i < 16; i++) { if (cellShake[i] > 0) cellShake[i] -= dt; if (cellPop[i] > 0) cellPop[i] -= dt; }
+  if (flash > 0) flash -= dt;
+  if (noticeT > 0 && !paused) noticeT -= dt;
+  if (state === "over") { overT += dt; return; }
+  if (paused) return;
+  if (state === "count") {
+    const before = Math.ceil(countT);
+    countT -= dt;
+    if (countT <= 0) { state = "play"; setNotice("시작! 1부터 눌러요", "#16a34a", 1.2); beep(880, 0.15, "triangle", 0.12); }
+    else if (Math.ceil(countT) !== before) beep(520, 0.08);
+    return;
+  }
+  if (state === "play") { elapsed += dt; if (penaltyCool > 0) penaltyCool -= dt; }
+}
+
+function rr(x, y, w, h, r) { ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h); }
+
+function draw() {
+  layout();
+  ctx.fillStyle = "#fdf6e3"; ctx.fillRect(0, 0, W, H);
+  beginShake();
+  if (state !== "title") {
+    const cs = gs / 4, gap = Math.max(3, cs * 0.07);
+    for (let i = 0; i < 16; i++) {
+      let x = gx + (i % 4) * cs + gap / 2, y = gy + Math.floor(i / 4) * cs + gap / 2, w = cs - gap, h = cs - gap;
+      const sk = cellShake[i] > 0 ? Math.sin(cellShake[i] * 60) * 4 : 0;
+      const pop = cellPop[i] > 0 ? cellPop[i] * 0.5 : 0;
+      const wrong = cellShake[i] > 0.1;
+      x += sk - w * pop / 2; y -= h * pop / 2; w *= 1 + pop; h *= 1 + pop;
+      const blue = ((i % 4) + Math.floor(i / 4)) % 2 === 0;
+      const v = vals[i];
+      ctx.fillStyle = state === "count" ? "#e5e7eb" : wrong ? "#fecaca" : v === 0 ? "#f1ece0" : blue ? "#bae6fd" : "#fde68a";
+      rr(x, y, w, h, cs * 0.18); ctx.fill();
+      if (state !== "count" && v > 0) {
+        const sc = SCALE[(i * 7 + v * 3) % 4];
+        text(String(v), x + w / 2, y + h / 2 + 1, Math.max(14, Math.round(cs * 0.44 * sc)), "center", "bold", "#1b265a");
+      }
+    }
+  }
+  endShake();
+  drawFx();
+  if (flash > 0) { ctx.fillStyle = `rgba(255,236,150,${Math.min(0.5, flash)})`; ctx.fillRect(0, 0, W, H); }
+  // HUD
+  if (state !== "title") {
+    const t = state === "count" ? 0 : curTime();
+    text(`${(state === "over" ? finalTime : t).toFixed(2)}초`, 12, hudH / 2, 20, "left", "bold");
+    if (state === "play" || state === "count") {
+      text("다음", W / 2, hudH / 2 - 14, 14, "center", "normal", "#64748b");
+      text(String(Math.min(next, 32)), W / 2, hudH / 2 + 8, 28, "center", "bold", "#d97706");
+    }
+    // 안내 칸 (한 번에 하나)
+    const ny = hudH + noteH / 2;
+    if (state === "count" && !paused) text(countT > 0 ? String(Math.ceil(countT)) : "", W / 2, ny, 22, "center", "bold", "#d97706");
+    else if (noticeT > 0) fitText(noticeText, W / 2, ny, 18, W - 16, "bold", noticeColor);
+    else if (state === "play" && next === 1) fitText("1부터 32까지 순서대로 눌러요", W / 2, ny, 16, W - 16, "normal", "#64748b");
+  }
+  if (state === "title") {
+    const cy = H / 2;
+    fitText("번쩍 노라라", W / 2, cy - 70, 38, W - 24, "bold", "#d97706");
+    fitText("숫자 빨리 누르기", W / 2, cy - 30, 30, W - 24, "bold");
+    fitText("1부터 32까지 순서대로 눌러요", W / 2, cy + 10, 16, W - 24);
+    fitText("키보드 1234 QWER ASDF ZXCV 또는 칸을 탭해요", W / 2, cy + 34, 14, W - 16, "normal", "#64748b");
+    fitText("탭하거나 스페이스를 눌러 시작", W / 2, cy + 72, 16, W - 24, "bold", "#d97706");
+  }
+  if (state === "over") {
+    const pw = Math.min(gs - 8, 300), ph = Math.min(gs - 8, 170), px = gx + gs / 2 - pw / 2, py = gy + gs / 2 - ph / 2;
+    ctx.fillStyle = "rgba(255,255,255,.96)"; rr(px, py, pw, ph, 16); ctx.fill();
+    ctx.strokeStyle = "#1b265a"; ctx.lineWidth = 2; ctx.stroke();
+    const k = ph / 170;
+    fitText("끝났어요!", W / 2, py + 28 * k, 22, pw - 16, "bold", "#d97706");
+    fitText(`${finalTime.toFixed(2)}초`, W / 2, py + 68 * k, 34, pw - 16, "bold");
+    fitText(`벌점 ${penalty.toFixed(1)}초 포함 · 최고 ${best.toFixed(2)}초`, W / 2, py + 104 * k, 14, pw - 16, "normal", "#64748b");
+    fitText(overT < 0.6 ? " " : "탭하거나 스페이스로 다시 하기", W / 2, py + 138 * k, 16, pw - 16, "bold", "#d97706");
+  }
+}
+
+/* ===== 메인 루프 ===== */
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (window.innerWidth !== W || window.innerHeight !== H) resize();
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
