@@ -27,7 +27,7 @@ AI로 만든 HTML 미니게임을 누구나 올리고 회원들이 플레이하�
 
 ## 공식 게임 (에이전트 제작)
 - 게임 파일: `games/<slug>/` (`index.html` 한 파일 + `game.json` + `thumbnail.png`). 규칙은 `games/README.md`, 뼈대는 `games/_template/`
-- 루틴: `.claude/routines/game-studio.md` (매일 예약 작업). 에이전트: `.claude/agents/game-planner.md`, `game-developer.md`, `game-qa.md` (셋 다 Opus). 공식 게임은 `games/README.md`의 '대작 기준'(최소를 채우고 최대를 넘지 않게)으로 만들고, 긴 게임은 `node scripts/play-long.mjs games/<slug>`로 시간을 빨리 감아 끝까지 검수해요
+- 루틴: `.claude/routines/game-studio.md` (매일 예약 작업). 에이전트: `.claude/agents/game-planner.md`, `game-developer.md`, `game-qa.md` (개발만 Opus, 기획·검수는 Sonnet). 공식 게임은 `games/README.md`의 '대작 기준'(최소를 채우고 최대를 넘지 않게)으로 만들고, 긴 게임은 `node scripts/play-long.mjs games/<slug>`로 시간을 빨리 감아 끝까지 검수해요
 - 안전장치 훅: `.claude/hooks/studio-guard.mjs` (`.claude/settings.json`에 등록). 클라우드(`CLAUDE_CODE_REMOTE=true`)에서만 켜져서 main push·강제 push·PR 병합·game-* 브랜치의 규칙 밖 파일을 막아요. 내 컴퓨터의 Claude Code에는 영향 없어요
 - 검사: `node scripts/check-game.mjs games/<slug>` — 실제 브라우저로 사이트와 같은 sandbox iframe에서 PC·휴대폰 크기로 켜봐요
 - 업로드: main에 `games/**`가 합쳐지면 `.github/workflows/official-games.yml` → `scripts/publish-official-games.mjs`. 공식 계정 이메일·비밀번호로 로그인해서 일반 회원과 같은 RPC를 써요 (service_role 키 안 씀)
