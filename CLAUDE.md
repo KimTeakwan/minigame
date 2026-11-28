@@ -21,13 +21,13 @@ AI로 만든 HTML 미니게임을 누구나 올리고 회원들이 플레이하�
 - 플레이수: 같은 유저는 게임당 하루(한국 시간) 1회만
 - 알림: 사이트 내 알림만 (이메일 없음)
 - 리더보드: 게임이 `public/sdk.js`의 `GameSDK.submitScore()` 호출 → postMessage → 플레이 페이지 → `submit_score` RPC
-- 공식 게임: 에이전트가 매일 3개까지 만들어 게임마다 PR로 올리고, 소유자가 PR에서 검토·병합하면 공식 계정으로 업로드. 공식 계정 게임에는 '공식' 배지
+- 공식 게임: 에이전트가 매일 1개 만들어 PR로 올리고, 소유자가 PR에서 검토·병합하면 공식 계정으로 업로드. 공식 계정 게임에는 '공식' 배지
 - 동시 접속자 수: 게임 화면을 보고 있는 사람(30초 heartbeat, 75초 지나면 빠짐). 카드·게임 페이지·헤더에 표시
 - 멀티: 누구나 업로드 때 '멀티 게임'으로 등록 가능, 한 방 2~8명, 빈자리 있는 방부터 채움. 플레이어끼리 자유 채팅 없음 (이모티콘 6개만). 메시지 2KB·1초 10개 제한
 
 ## 공식 게임 (에이전트 제작)
 - 게임 파일: `games/<slug>/` (`index.html` 한 파일 + `game.json` + `thumbnail.png`). 규칙은 `games/README.md`, 뼈대는 `games/_template/`
-- 루틴: `.claude/routines/game-studio.md` (매일 예약 작업). 에이전트: `.claude/agents/game-planner.md`, `game-developer.md`, `game-qa.md` (셋 다 Opus). 공식 게임은 `games/README.md`의 '대작 기준'으로 만들고, 긴 게임은 `node scripts/play-long.mjs games/<slug>`로 시간을 빨리 감아 끝까지 검수해요
+- 루틴: `.claude/routines/game-studio.md` (매일 예약 작업). 에이전트: `.claude/agents/game-planner.md`, `game-developer.md`, `game-qa.md` (셋 다 Opus). 공식 게임은 `games/README.md`의 '대작 기준'(최소를 채우고 최대를 넘지 않게)으로 만들고, 긴 게임은 `node scripts/play-long.mjs games/<slug>`로 시간을 빨리 감아 끝까지 검수해요
 - 안전장치 훅: `.claude/hooks/studio-guard.mjs` (`.claude/settings.json`에 등록). 클라우드(`CLAUDE_CODE_REMOTE=true`)에서만 켜져서 main push·강제 push·PR 병합·game-* 브랜치의 규칙 밖 파일을 막아요. 내 컴퓨터의 Claude Code에는 영향 없어요
 - 검사: `node scripts/check-game.mjs games/<slug>` — 실제 브라우저로 사이트와 같은 sandbox iframe에서 PC·휴대폰 크기로 켜봐요
 - 업로드: main에 `games/**`가 합쳐지면 `.github/workflows/official-games.yml` → `scripts/publish-official-games.mjs`. 공식 계정 이메일·비밀번호로 로그인해서 일반 회원과 같은 RPC를 써요 (service_role 키 안 씀)
